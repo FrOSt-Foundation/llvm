@@ -105,6 +105,9 @@ protected:
   /// "#"
   StringRef CommentString;
 
+  /// This is prefixed to emitted labels.  Defaults to ""
+  const char *LabelPrefix;
+
   /// This is appended to emitted labels.  Defaults to ":"
   const char *LabelSuffix;
 
