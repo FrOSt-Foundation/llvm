@@ -3467,8 +3467,8 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
     // Copy the value to a (aligned) stack slot using (unaligned) integer
     // loads and stores, then do a (aligned) load from the stack slot.
     MVT RegVT = getRegisterType(*DAG.getContext(), intVT);
-    unsigned LoadedBytes = LoadedVT.getSizeInBits() / 8;
-    unsigned RegBytes = RegVT.getSizeInBits() / 8;
+    unsigned LoadedBytes = LoadedVT.getSize();
+    unsigned RegBytes = RegVT.getSize(EVT::getBitsPerByte());
     unsigned NumRegs = (LoadedBytes + RegBytes - 1) / RegBytes;
 
     // Make sure the stack slot is also aligned for the register type.
@@ -3503,7 +3503,8 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
 
     // The last copy may be partial.  Do an extending load.
     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(),
-                                  8 * (LoadedBytes - Offset));
+                                  EVT::getBitsPerByte() *
+                                  (LoadedBytes - Offset));
     SDValue Load =
         DAG.getExtLoad(ISD::EXTLOAD, dl, RegVT, Chain, Ptr,
                        LD->getPointerInfo().getWithOffset(Offset), MemVT,
@@ -3537,7 +3538,7 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
   NumBits >>= 1;
 
   unsigned Alignment = LD->getAlignment();
-  unsigned IncrementSize = NumBits / 8;
+  unsigned IncrementSize = NumBits / EVT::getBitsPerByte();
   ISD::LoadExtType HiExtType = LD->getExtensionType();
 
   // If the original load is NON_EXTLOAD, the hi part load must be ZEXTLOAD.
@@ -3618,8 +3619,8 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
                       EVT::getIntegerVT(*DAG.getContext(),
                                         StoredVT.getSizeInBits()));
     EVT PtrVT = Ptr.getValueType();
-    unsigned StoredBytes = StoredVT.getSizeInBits() / 8;
-    unsigned RegBytes = RegVT.getSizeInBits() / 8;
+    unsigned StoredBytes = StoredVT.getSize();
+    unsigned RegBytes = RegVT.getSize(EVT::getBitsPerByte());
     unsigned NumRegs = (StoredBytes + RegBytes - 1) / RegBytes;
 
     // Make sure the stack slot is also aligned for the register type.
@@ -3657,7 +3658,8 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
     // machines this requires an extending load from the stack slot to ensure
     // that the bits are in the right place.
     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(),
-                                  8 * (StoredBytes - Offset));
+                                  EVT::getBitsPerByte() *
+                                  (StoredBytes - Offset));
 
     // Load from the stack slot.
     SDValue Load = DAG.getExtLoad(ISD::EXTLOAD, dl, RegVT, Store, StackPtr,
@@ -3679,7 +3681,7 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
   // Get the half-size VT
   EVT NewStoredVT = ST->getMemoryVT().getHalfSizedIntegerVT(*DAG.getContext());
   int NumBits = NewStoredVT.getSizeInBits();
-  int IncrementSize = NumBits / 8;
+  int IncrementSize = NumBits / EVT::getBitsPerByte();
 
   // Divide the stored value in two parts.
   SDValue ShiftAmount =
@@ -3771,8 +3773,8 @@ SDValue TargetLowering::getVectorElementPointer(SelectionDAG &DAG,
   EVT EltVT = VecVT.getVectorElementType();
 
   // Calculate the element offset and add it to the pointer.
-  unsigned EltSize = EltVT.getSizeInBits() / 8; // FIXME: should be ABI size.
-  assert(EltSize * 8 == EltVT.getSizeInBits() &&
+  unsigned EltSize = EltVT.getSize(); // FIXME: should be ABI size.
+  assert(EltSize * EVT::getBitsPerByte() == EltVT.getSizeInBits() &&
          "Converting bits to bytes lost precision");
 
   Index = clampDynamicVectorIndex(DAG, Index, VecVT, dl);

@@ -103,6 +103,8 @@ class DataLayout {
 private:
   /// Defaults to false.
   bool BigEndian;
+  unsigned      BitsPerByte;           ///< Number of bits in an addressable
+                                       ///< byte. Defaults to 8.
 
   unsigned StackNaturalAlign;
 
@@ -182,6 +184,24 @@ private:
   // Free all internal data structures.
   void clear();
 
+  /// Return the largest pointer size for known address spaces.
+  unsigned getMaxPointerSize() const {
+    unsigned MaxPtrSize = 0;
+    for (PointersTy::const_iterator I = Pointers.begin(), E = Pointers.end();
+         I != E; ++I) {
+      MaxPtrSize = std::max(MaxPtrSize, I->TypeByteWidth);
+    }
+
+    return (MaxPtrSize == 0) ? 64 : MaxPtrSize;
+  }
+
+  /// Convert number of bits into number of octets.
+  uint64_t inOctets(uint64_t Bits) const {
+    assert((Bits % 8 == 0) &&
+           "number of bits must be an octet width multiple");
+    return (Bits + 8 - 1) / 8;
+  }
+
 public:
   /// Constructs a DataLayout from a specification string. See reset().
   explicit DataLayout(StringRef LayoutDescription) : LayoutMap(nullptr) {
@@ -200,6 +220,7 @@ public:
     StringRepresentation = DL.StringRepresentation;
     BigEndian = DL.isBigEndian();
     StackNaturalAlign = DL.StackNaturalAlign;
+    BitsPerByte = DL.BitsPerByte;
     ManglingMode = DL.ManglingMode;
     LegalIntWidths = DL.LegalIntWidths;
     Alignments = DL.Alignments;
@@ -219,6 +240,23 @@ public:
   /// Layout endianness...
   bool isLittleEndian() const { return !BigEndian; }
   bool isBigEndian() const { return BigEndian; }
+
+  /// Convert number of bytes into number of bits.
+  uint64_t inBits(uint64_t Bytes) const {
+    return Bytes * BitsPerByte;
+  }
+  /// Convert number of bits into number of bytes. Optionally, return the
+  /// ceiling value. Oterwise, check that the number is a even byte width
+  /// multiple.
+  uint64_t inBytes(uint64_t Bits, bool ceil = false) const {
+    if (!(ceil || Bits % BitsPerByte == 0))
+      report_fatal_error("number of bits must be a byte width multiple");
+
+    return (Bits + BitsPerByte - 1) / BitsPerByte;
+  }
+
+  // FIXME: remove?
+  unsigned getBitsPerByte() const { return BitsPerByte; }
 
   /// \brief Returns the string representation of the DataLayout.
   ///
@@ -343,11 +381,17 @@ public:
     return PTy && isNonIntegralPointerType(PTy);
   }
 
+  /// Return the largest pointer size for known address spaces. ('address_space'
+  /// in DWARF.)
+  unsigned getMaxPointerSizeInOctets() const {
+    return inOctets(inBits(getMaxPointerSize()));
+  }
+
   /// Layout pointer size, in bits
   /// FIXME: The defaults need to be removed once all of
   /// the backends/clients are updated.
   unsigned getPointerSizeInBits(unsigned AS = 0) const {
-    return getPointerSize(AS) * 8;
+    return inBits(getPointerSize(AS));
   }
 
   /// Layout pointer size, in bits, based on the type.  If this function is
@@ -389,7 +433,7 @@ public:
   ///
   /// For example, returns 5 for i36 and 10 for x86_fp80.
   uint64_t getTypeStoreSize(Type *Ty) const {
-    return (getTypeSizeInBits(Ty) + 7) / 8;
+    return inBytes(getTypeSizeInBits(Ty), /*ceil=*/true);
   }
 
   /// \brief Returns the maximum number of bits that may be overwritten by
@@ -397,7 +441,7 @@ public:
   ///
   /// For example, returns 40 for i36 and 80 for x86_fp80.
   uint64_t getTypeStoreSizeInBits(Type *Ty) const {
-    return 8 * getTypeStoreSize(Ty);
+    return inBits(getTypeStoreSize(Ty));
   }
 
   /// \brief Returns the offset in bytes between successive objects of the
@@ -416,7 +460,7 @@ public:
   /// This is the amount that alloca reserves for this type. For example,
   /// returns 96 or 128 for x86_fp80, depending on alignment.
   uint64_t getTypeAllocSizeInBits(Type *Ty) const {
-    return 8 * getTypeAllocSize(Ty);
+    return inBits(getTypeAllocSize(Ty));
   }
 
   /// \brief Returns the minimum ABI-required alignment for the specified type.
@@ -502,8 +546,6 @@ class StructLayout {
 public:
   uint64_t getSizeInBytes() const { return StructSize; }
 
-  uint64_t getSizeInBits() const { return 8 * StructSize; }
-
   unsigned getAlignment() const { return StructAlignment; }
 
   /// Returns whether the struct has padding or not between its fields.
@@ -517,10 +559,6 @@ public:
   uint64_t getElementOffset(unsigned Idx) const {
     assert(Idx < NumElements && "Invalid element idx!");
     return MemberOffsets[Idx];
-  }
-
-  uint64_t getElementOffsetInBits(unsigned Idx) const {
-    return getElementOffset(Idx) * 8;
   }
 
 private:
@@ -544,7 +582,7 @@ inline uint64_t DataLayout::getTypeSizeInBits(Type *Ty) const {
   }
   case Type::StructTyID:
     // Get the layout annotation... which is lazily created on demand.
-    return getStructLayout(cast<StructType>(Ty))->getSizeInBits();
+    return inBits(getStructLayout(cast<StructType>(Ty))->getSizeInBytes());
   case Type::IntegerTyID:
     return Ty->getIntegerBitWidth();
   case Type::HalfTyID:
