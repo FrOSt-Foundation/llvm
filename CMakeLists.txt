@@ -322,26 +322,27 @@ set(LLVM_EXAMPLES_BINARY_DIR ${LLVM_BINARY_DIR}/examples)
 set(LLVM_INCLUDE_DIR ${CMAKE_CURRENT_BINARY_DIR}/include)
 
 set(LLVM_ALL_TARGETS
-  AArch64
-  AMDGPU
-  ARM
-  BPF
-  Hexagon
-  JSBackend # @LOCALMOD
-  Lanai
-  Mips
-  MSP430
-  NVPTX
-  PowerPC
-  RISCV
-  Sparc
-  SystemZ
-  X86
-  XCore
+    #  AArch64
+    #  AMDGPU
+# ARM
+# BPF
+# Hexagon
+ JSBackend # @LOCALMOD
+# Lanai
+# Mips
+# MSP430
+# NVPTX
+# PowerPC
+# RISCV
+# Sparc
+# SystemZ
+ X86
+# XCore
   )
 
 # List of targets with JIT support:
-set(LLVM_TARGETS_WITH_JIT X86 PowerPC AArch64 ARM Mips SystemZ)
+# set(LLVM_TARGETS_WITH_JIT X86 PowerPC AArch64 ARM Mips SystemZ)
+set(LLVM_TARGETS_WITH_JIT)
 
 set(LLVM_TARGETS_TO_BUILD "all"
     CACHE STRING "Semicolon-separated list of targets to build, or \"all\".")
@@ -388,7 +389,7 @@ list(REMOVE_DUPLICATES LLVM_TARGETS_TO_BUILD)
 
 include(AddLLVMDefinitions)
 
-option(LLVM_ENABLE_PIC "Build Position-Independent Code" ON)
+option(LLVM_ENABLE_PIC "Build Position-Independent Code" OFF)
 option(LLVM_ENABLE_WARNINGS "Enable compiler warnings." ON)
 option(LLVM_ENABLE_MODULES "Compile with C++ modules enabled." OFF)
 if(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
@@ -505,13 +506,13 @@ option(LLVM_BUILD_TOOLS
 
 option(LLVM_INCLUDE_UTILS "Generate build targets for the LLVM utils." ON)
 option(LLVM_BUILD_UTILS
-  "Build LLVM utility binaries. If OFF, just generate build targets." ON)
+    "Build LLVM utility binaries. If OFF, just generate build targets." OFF)
 
 option(LLVM_BUILD_RUNTIME
-  "Build the LLVM runtime libraries." ON)
+    "Build the LLVM runtime libraries." OFF)
 option(LLVM_BUILD_EXAMPLES
   "Build the LLVM example programs. If OFF, just generate build targets." OFF)
-option(LLVM_INCLUDE_EXAMPLES "Generate build targets for the LLVM examples" ON)
+option(LLVM_INCLUDE_EXAMPLES "Generate build targets for the LLVM examples" OFF)
 
 option(LLVM_BUILD_TESTS
   "Build LLVM unit tests. If OFF, just generate build targets." OFF)
@@ -519,10 +520,10 @@ option(LLVM_INCLUDE_TESTS "Generate build targets for the LLVM unit tests." ON)
 option(LLVM_INCLUDE_GO_TESTS "Include the Go bindings tests in test build targets." ON)
 
 option (LLVM_BUILD_DOCS "Build the llvm documentation." OFF)
-option (LLVM_INCLUDE_DOCS "Generate build targets for llvm documentation." ON)
+option (LLVM_INCLUDE_DOCS "Generate build targets for llvm documentation." OFF)
 option (LLVM_ENABLE_DOXYGEN "Use doxygen to generate llvm API documentation." OFF)
 option (LLVM_ENABLE_SPHINX "Use Sphinx to generate llvm documentation." OFF)
-option (LLVM_ENABLE_OCAMLDOC "Build OCaml bindings documentation." ON)
+option (LLVM_ENABLE_OCAMLDOC "Build OCaml bindings documentation." OFF)
 
 set(LLVM_INSTALL_DOXYGEN_HTML_DIR "share/doc/llvm/doxygen-html"
     CACHE STRING "Doxygen-generated HTML documentation install directory")
