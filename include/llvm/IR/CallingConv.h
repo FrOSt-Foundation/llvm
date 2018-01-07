@@ -200,6 +200,9 @@ namespace CallingConv {
     /// which have an "optimized" convention using additional registers.
     MSP430_BUILTIN = 94,
 
+    /// Calling convention used for DCPU16 interrupt routines
+    DCPU16_INTR = 95,
+
     /// The highest possible calling convention ID. Must be some 2^k - 1.
     MaxID = 1023
   };

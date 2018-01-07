@@ -315,6 +315,7 @@ enum {
   // such numbers for an official value for WebAssembly. As soon as one is
   // allocated, this enum will be updated to use it.
   EM_WEBASSEMBLY = 0x4157, // WebAssembly architecture
+  EM_DCPU16 = 0x4158,
 };
 
 // Object file classes.
