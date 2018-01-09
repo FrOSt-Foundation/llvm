@@ -135,6 +135,7 @@ enum Kind {
   kw_msp430_intrcc,
   kw_avr_intrcc,
   kw_avr_signalcc,
+  kw_dcpu16_initcc,
   kw_ptx_kernel,
   kw_ptx_device,
   kw_spir_kernel,

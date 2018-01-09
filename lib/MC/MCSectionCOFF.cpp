@@ -25,8 +25,8 @@ bool MCSectionCOFF::ShouldOmitSectionDirective(StringRef Name,
     return false;
 
   // FIXME: Does .section .bss/.data/.text work everywhere??
-  if (Name == ".text" || Name == ".data" || Name == ".bss")
-    return true;
+  //if (Name == ".text" || Name == ".data" || Name == ".bss")
+    //return true;
 
   return false;
 }
@@ -41,7 +41,7 @@ void MCSectionCOFF::PrintSwitchToSection(const MCAsmInfo &MAI,
                                          raw_ostream &OS,
                                          const MCExpr *Subsection) const {
 
-  // standard sections don't require the '.section'
+  /* // standard sections don't require the '.section'
   if (ShouldOmitSectionDirective(SectionName, MAI)) {
     OS << '\t' << getSectionName() << '\n';
     return;
@@ -101,6 +101,7 @@ void MCSectionCOFF::PrintSwitchToSection(const MCAsmInfo &MAI,
     COMDATSymbol->print(OS, &MAI);
   }
   OS << '\n';
+  */
 }
 
 bool MCSectionCOFF::UseCodeAlign() const {

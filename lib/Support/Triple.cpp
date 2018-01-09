@@ -66,6 +66,7 @@ StringRef Triple::getArchTypeName(ArchType Kind) {
   case kalimba:        return "kalimba";
   case lanai:          return "lanai";
   case shave:          return "shave";
+  case dcpu16:         return "dcpu16";
   case wasm32:         return "wasm32";
   case wasm64:         return "wasm64";
   case renderscript32: return "renderscript32";
@@ -1152,6 +1153,7 @@ static unsigned getArchPointerBitWidth(llvm::Triple::ArchType Arch) {
 
   case llvm::Triple::avr:
   case llvm::Triple::msp430:
+  case llvm::Triple::dcpu16:
     return 16;
 
   case llvm::Triple::arm:
@@ -1231,6 +1233,7 @@ Triple Triple::get32BitArchVariant() const {
   case Triple::msp430:
   case Triple::systemz:
   case Triple::ppc64le:
+  case Triple::dcpu16:
     T.setArch(UnknownArch);
     break;
 
@@ -1299,6 +1302,7 @@ Triple Triple::get64BitArchVariant() const {
   case Triple::asmjs: // @LOCALMOD Emscripten
   case Triple::sparcel:
   case Triple::shave:
+  case Triple::dcpu16:
     T.setArch(UnknownArch);
     break;
 

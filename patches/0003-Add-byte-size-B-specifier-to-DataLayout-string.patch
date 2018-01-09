@@ -1,0 +1,99 @@
+From ee5985ca8588b5c97bc4b189333a34af8beb6850 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mikael=20Holm=C3=A9n?= <mikael.holmen@ericsson.com>
+Date: Mon, 9 Mar 2015 11:44:35 +0100
+Subject: [PATCH 3/7] Add byte size ('B' specifier) to DataLayout string.
+
+TODO: refactor alignment read code
+
+TODO: prefAlign = 1 by default?
+
+TODO: docs
+
+Conflicts:
+	include/llvm/IR/DataLayout.h
+---
+ include/llvm/IR/DataLayout.h | 15 ++++++++-------
+ lib/IR/DataLayout.cpp        |  8 ++++++++
+ 2 files changed, 16 insertions(+), 7 deletions(-)
+
+diff --git a/include/llvm/IR/DataLayout.h b/include/llvm/IR/DataLayout.h
+index b13427c..dc95798 100644
+--- a/include/llvm/IR/DataLayout.h
++++ b/include/llvm/IR/DataLayout.h
+@@ -103,6 +103,8 @@ class DataLayout {
+ private:
+   /// Defaults to false.
+   bool BigEndian;
++  unsigned      BitsPerByte;           ///< Number of bits in an addressable
++                                       ///< byte. Defaults to 8.
+ 
+   unsigned StackNaturalAlign;
+ 
+@@ -200,6 +202,7 @@ public:
+     StringRepresentation = DL.StringRepresentation;
+     BigEndian = DL.isBigEndian();
+     StackNaturalAlign = DL.StackNaturalAlign;
++    BitsPerByte = DL.BitsPerByte;
+     ManglingMode = DL.ManglingMode;
+     LegalIntWidths = DL.LegalIntWidths;
+     Alignments = DL.Alignments;
+@@ -221,17 +224,16 @@ public:
+   bool isBigEndian() const { return BigEndian; }
+ 
+   /// Convert number of bytes into number of bits.
+-  static uint64_t inBits(uint64_t Bytes) {
+-    return Bytes * 8;
++  uint64_t inBits(uint64_t Bytes) const {
++    return Bytes * BitsPerByte;
+   }
+   /// Convert number of bits into number of bytes. Optionally, return the
+   /// ceiling value. Oterwise, check that the number is a even byte width
+   /// multiple.
+-  static uint64_t inBytes(uint64_t Bits, bool ceil = false) {
+-    if (!(ceil || Bits % 8 == 0))
++  uint64_t inBytes(uint64_t Bits, bool ceil = false) const {
++    if (!(ceil || Bits % BitsPerByte == 0))
+       report_fatal_error("number of bits must be a byte width multiple");
+-
+-    return (Bits + 7) / 8;
++    return (Bits + BitsPerByte - 1) / BitsPerByte;
+   }
+ 
+   /// \brief Returns the string representation of the DataLayout.
+@@ -516,7 +518,6 @@ class StructLayout {
+ public:
+   uint64_t getSizeInBytes() const { return StructSize; }
+ 
+-  uint64_t getSizeInBits() const { return DataLayout::inBits(StructSize); }
+   unsigned getAlignment() const { return StructAlignment; }
+ 
+   /// Returns whether the struct has padding or not between its fields.
+diff --git a/lib/IR/DataLayout.cpp b/lib/IR/DataLayout.cpp
+index 98cc1b3..c2719a1 100644
+--- a/lib/IR/DataLayout.cpp
++++ b/lib/IR/DataLayout.cpp
+@@ -181,6 +181,7 @@ void DataLayout::reset(StringRef Desc) {
+   LayoutMap = nullptr;
+   BigEndian = false;
+   StackNaturalAlign = 0;
++  BitsPerByte = 8;
+   ManglingMode = MM_None;
+   NonIntegralAddressSpaces.clear();
+ 
+@@ -352,6 +353,13 @@ void DataLayout::parseSpecifier(StringRef Desc) {
+       StackNaturalAlign = inBytes(getInt(Tok));
+       break;
+     }
++    case 'B': { // byte size
++      // Note: 'B' has to be specified *before* other specifiers that depend on
++      // the byte size. That is, p, i, v, f, a, s, and n. Otherwise, the default
++      // value of 8 bits will be used for the calculating the alignment numbers.
++      BitsPerByte = getInt(Tok);
++      break;
++    }
+     case 'm':
+       if (!Tok.empty())
+         report_fatal_error("Unexpected trailing characters after mangling specifier in datalayout string");
+-- 
+2.9.3
+

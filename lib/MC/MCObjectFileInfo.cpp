@@ -589,7 +589,10 @@ void MCObjectFileInfo::initCOFFMCObjectFileInfo(const Triple &T) {
   // and to set the ISA selection bit for calls accordingly.
   const bool IsThumb = T.getArch() == Triple::thumb;
 
-  CommDirectiveSupportsAlignment = true;
+  if (T.getArch() == Triple::dcpu16)
+    CommDirectiveSupportsAlignment = false;
+  else
+    CommDirectiveSupportsAlignment = true;
 
   // COFF
   BSSSection = Ctx->getCOFFSection(

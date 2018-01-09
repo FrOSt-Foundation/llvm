@@ -1,0 +1,43 @@
+From 088ecf347779da2f51c4982952f2352f701332c3 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mikael=20Holm=C3=A9n?= <mikael.holmen@ericsson.com>
+Date: Mon, 17 Nov 2014 09:08:17 +0100
+Subject: [PATCH 7/7] Divide the RegSize and Alignment with EVT::getBitsPerByte
+ insteadof 8 to get correct sizes
+
+---
+ include/llvm/Target/TargetRegisterInfo.h | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/include/llvm/Target/TargetRegisterInfo.h b/include/llvm/Target/TargetRegisterInfo.h
+index 67c2a67f..3d54f84 100644
+--- a/include/llvm/Target/TargetRegisterInfo.h
++++ b/include/llvm/Target/TargetRegisterInfo.h
+@@ -19,7 +19,7 @@
+ #include "llvm/ADT/ArrayRef.h"
+ #include "llvm/ADT/iterator_range.h"
+ #include "llvm/CodeGen/MachineBasicBlock.h"
+-#include "llvm/CodeGen/MachineValueType.h"
++#include "llvm/CodeGen/ValueTypes.h"
+ #include "llvm/IR/CallingConv.h"
+ #include "llvm/MC/MCRegisterInfo.h"
+ #include "llvm/Support/Printable.h"
+@@ -94,10 +94,14 @@ public:
+ 
+   /// Return the size of the register in bytes, which is also the size
+   /// of a stack slot allocated to hold a spilled copy of this register.
+-  unsigned getSize() const { return MC->getSizeInBits() / 8; }
++  unsigned getSize() const {
++    return MC->getSizeInBits() / EVT::getBitsPerByte();
++  }
+ 
+   /// Return the minimum required alignment for a register of this class.
+-  unsigned getAlignment() const { return MC->getAlignmentInBits() / 8; }
++  unsigned getAlignment() const {
++    return MC->getAlignmentInBits() / EVT::getBitsPerByte();
++  }
+ 
+   /// Return the cost of copying a value between two registers in this class.
+   /// A negative number means the register class is very expensive
+-- 
+2.9.3
+

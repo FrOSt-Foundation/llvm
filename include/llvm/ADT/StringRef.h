@@ -569,6 +569,9 @@ namespace llvm {
     LLVM_NODISCARD
     std::string upper() const;
 
+    // Removes all \\00 in a string.
+    StringRef removeZero() const;
+
     /// @}
     /// @name Substring Operations
     /// @{

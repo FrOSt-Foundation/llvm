@@ -1,0 +1,61 @@
+From af1bbe96c06a311ade978abeb9d9071fa8065c74 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mikael=20Holm=C3=A9n?= <mikael.holmen@ericsson.com>
+Date: Wed, 11 Mar 2015 10:47:49 +0100
+Subject: [PATCH 2/7] Remove StructLayout::getSizeInBits.
+
+Remove StructLayout::getElementOffsetInBits.
+
+This makes StructLayout independent of byte size.
+---
+ include/llvm/IR/DataLayout.h             | 7 +------
+ lib/Transforms/IPO/ArgumentPromotion.cpp | 2 +-
+ 2 files changed, 2 insertions(+), 7 deletions(-)
+
+diff --git a/include/llvm/IR/DataLayout.h b/include/llvm/IR/DataLayout.h
+index 1562f19..b13427c 100644
+--- a/include/llvm/IR/DataLayout.h
++++ b/include/llvm/IR/DataLayout.h
+@@ -517,7 +517,6 @@ public:
+   uint64_t getSizeInBytes() const { return StructSize; }
+ 
+   uint64_t getSizeInBits() const { return DataLayout::inBits(StructSize); }
+-
+   unsigned getAlignment() const { return StructAlignment; }
+ 
+   /// Returns whether the struct has padding or not between its fields.
+@@ -533,10 +532,6 @@ public:
+     return MemberOffsets[Idx];
+   }
+ 
+-  uint64_t getElementOffsetInBits(unsigned Idx) const {
+-    return DataLayout::inBits(getElementOffset(Idx));
+-  }
+-
+ private:
+   friend class DataLayout; // Only DataLayout can create this class
+   StructLayout(StructType *ST, const DataLayout &DL);
+@@ -558,7 +553,7 @@ inline uint64_t DataLayout::getTypeSizeInBits(Type *Ty) const {
+   }
+   case Type::StructTyID:
+     // Get the layout annotation... which is lazily created on demand.
+-    return getStructLayout(cast<StructType>(Ty))->getSizeInBits();
++    return inBits(getStructLayout(cast<StructType>(Ty))->getSizeInBytes());
+   case Type::IntegerTyID:
+     return Ty->getIntegerBitWidth();
+   case Type::HalfTyID:
+diff --git a/lib/Transforms/IPO/ArgumentPromotion.cpp b/lib/Transforms/IPO/ArgumentPromotion.cpp
+index 65b7bad..9be951c 100644
+--- a/lib/Transforms/IPO/ArgumentPromotion.cpp
++++ b/lib/Transforms/IPO/ArgumentPromotion.cpp
+@@ -186,7 +186,7 @@ static bool isDenselyPacked(Type *type, const DataLayout &DL) {
+     Type *ElTy = StructTy->getElementType(i);
+     if (!isDenselyPacked(ElTy, DL))
+       return false;
+-    if (StartPos != Layout->getElementOffsetInBits(i))
++    if (StartPos != DL.inBits(Layout->getElementOffset(i)))
+       return false;
+     StartPos += DL.getTypeAllocSizeInBits(ElTy);
+   }
+-- 
+2.9.3
+

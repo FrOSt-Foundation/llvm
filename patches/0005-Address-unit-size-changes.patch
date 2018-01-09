@@ -1,0 +1,1893 @@
+From a3e2f8a566a58327e3ff2c6c4e9be81d5576bca2 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Mikael=20Holm=C3=A9n?= <mikael.holmen@ericsson.com>
+Date: Thu, 15 Sep 2016 07:45:52 +0200
+Subject: [PATCH 5/7] Address unit size changes.
+
+---
+ include/llvm/CodeGen/MachineValueType.h           |  17 +++-
+ include/llvm/CodeGen/ValueTypes.h                 |  29 ++++--
+ include/llvm/IR/DataLayout.h                      |  27 ++++++
+ include/llvm/IR/IRBuilder.h                       |  16 ++++
+ lib/Analysis/ConstantFolding.cpp                  |  12 ++-
+ lib/Analysis/ValueTracking.cpp                    |  26 +++---
+ lib/CodeGen/AsmPrinter/AsmPrinter.cpp             |  56 ++++++++++--
+ lib/CodeGen/AsmPrinter/DIE.cpp                    |  18 +++-
+ lib/CodeGen/AsmPrinter/DwarfUnit.cpp              |   9 +-
+ lib/CodeGen/MachineFunction.cpp                   |   2 +-
+ lib/CodeGen/SelectionDAG/DAGCombiner.cpp          |  38 ++++----
+ lib/CodeGen/SelectionDAG/LegalizeDAG.cpp          |  24 ++---
+ lib/CodeGen/SelectionDAG/LegalizeIntegerTypes.cpp |  12 +--
+ lib/CodeGen/SelectionDAG/LegalizeTypesGeneric.cpp |   6 +-
+ lib/CodeGen/SelectionDAG/LegalizeVectorOps.cpp    |   1 +
+ lib/CodeGen/SelectionDAG/LegalizeVectorTypes.cpp  |  16 ++--
+ lib/CodeGen/SelectionDAG/SelectionDAG.cpp         |  36 ++++----
+ lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp  |   2 +-
+ lib/CodeGen/SelectionDAG/TargetLowering.cpp       |  22 ++---
+ lib/CodeGen/TargetLoweringBase.cpp                |   2 +-
+ lib/IR/DataLayout.cpp                             |   2 +
+ lib/IR/IRBuilder.cpp                              |  23 +++--
+ lib/IR/ValueTypes.cpp                             |   2 +
+ lib/Target/AMDGPU/SIISelLowering.cpp              |   2 +-
+ lib/Target/Hexagon/HexagonISelLowering.cpp        |   2 +-
+ lib/Target/PowerPC/PPCISelLowering.cpp            |  14 +--
+ lib/Target/PowerPC/PPCTargetTransformInfo.cpp     |   2 +-
+ lib/Target/X86/X86ISelLowering.cpp                |   6 +-
+ lib/Transforms/InstCombine/InstCombineCalls.cpp   |   6 +-
+ lib/Transforms/Scalar/GVN.cpp                     |  47 ++++++----
+ lib/Transforms/Scalar/SROA.cpp                    | 102 ++++++++++++----------
+ 31 files changed, 384 insertions(+), 195 deletions(-)
+
+diff --git a/include/llvm/CodeGen/MachineValueType.h b/include/llvm/CodeGen/MachineValueType.h
+index de7064f..3d8fe46 100644
+--- a/include/llvm/CodeGen/MachineValueType.h
++++ b/include/llvm/CodeGen/MachineValueType.h
+@@ -516,16 +516,25 @@ class MVT {
+       return getScalarType().getSizeInBits();
+     }
+ 
++    /// getSize - Return the size of the specified value type in bytes.
++    unsigned getSize(unsigned BitsPerByte = 8) const {
++      unsigned Size = getSizeInBits() / BitsPerByte;
++      // XXXpath: When do we want this function, instead of getStoreSize? For
++      // example, for i1?
++      assert(Size == getStoreSize(BitsPerByte));
++      return Size;
++    }
++
+     /// getStoreSize - Return the number of bytes overwritten by a store
+     /// of the specified value type.
+-    unsigned getStoreSize() const {
+-      return (getSizeInBits() + 7) / 8;
++    unsigned getStoreSize(unsigned BitsPerByte = 8) const {
++      return (getSizeInBits() + (BitsPerByte - 1)) / BitsPerByte;
+     }
+ 
+     /// getStoreSizeInBits - Return the number of bits overwritten by a store
+     /// of the specified value type.
+-    unsigned getStoreSizeInBits() const {
+-      return getStoreSize() * 8;
++    unsigned getStoreSizeInBits(unsigned BitsPerByte = 8) const {
++      return getStoreSize() * BitsPerByte ;
+     }
+ 
+     /// Return true if this has more bits than VT.
+diff --git a/include/llvm/CodeGen/ValueTypes.h b/include/llvm/CodeGen/ValueTypes.h
+index 2699fa28..7302fef 100644
+--- a/include/llvm/CodeGen/ValueTypes.h
++++ b/include/llvm/CodeGen/ValueTypes.h
+@@ -32,6 +32,7 @@ namespace llvm {
+   private:
+     MVT V;
+     Type *LLVMTy;
++    static unsigned BitsPerByte;
+ 
+   public:
+     constexpr EVT() : V(MVT::INVALID_SIMPLE_VALUE_TYPE), LLVMTy(nullptr) {}
+@@ -49,6 +50,13 @@ namespace llvm {
+       return false;
+     }
+ 
++    static void setBitsPerByte(unsigned size) {
++      BitsPerByte = size;
++    }
++    static unsigned getBitsPerByte() {
++      return BitsPerByte;
++    }
++
+     /// getFloatingPointVT - Returns the EVT that represents a floating point
+     /// type with the given number of bits.  There are two floating point types
+     /// with 128 bits - this returns f128 rather than ppcf128.
+@@ -179,15 +187,15 @@ namespace llvm {
+       return (V==MVT::iAny || V==MVT::fAny || V==MVT::vAny || V==MVT::iPTRAny);
+     }
+ 
+-    /// isByteSized - Return true if the bit size is a multiple of 8.
++    /// isByteSized - Return true if the bit size is a multiple of BitsPerByte.
+     bool isByteSized() const {
+-      return (getSizeInBits() & 7) == 0;
++      return (getSizeInBits() & (BitsPerByte - 1)) == 0;
+     }
+ 
+-    /// isRound - Return true if the size is a power-of-two number of bytes.
++    /// isRound - Return true if the size is a power-of-two number of BitsPerByte.
+     bool isRound() const {
+       unsigned BitSize = getSizeInBits();
+-      return BitSize >= 8 && !(BitSize & (BitSize - 1));
++      return BitSize >= BitsPerByte && !(BitSize & (BitSize - 1));
+     }
+ 
+     /// bitsEq - Return true if this has the same number of bits as VT.
+@@ -259,6 +267,11 @@ namespace llvm {
+       return getExtendedSizeInBits();
+     }
+ 
++    /// getSize - Return the size of the specified value type in bytes.
++    unsigned getSize() const {
++      return getSizeInBits() / BitsPerByte;
++    }
++
+     unsigned getScalarSizeInBits() const {
+       return getScalarType().getSizeInBits();
+     }
+@@ -266,13 +279,13 @@ namespace llvm {
+     /// getStoreSize - Return the number of bytes overwritten by a store
+     /// of the specified value type.
+     unsigned getStoreSize() const {
+-      return (getSizeInBits() + 7) / 8;
++      return (getSizeInBits() + (BitsPerByte-1)) / BitsPerByte;
+     }
+ 
+     /// getStoreSizeInBits - Return the number of bits overwritten by a store
+     /// of the specified value type.
+     unsigned getStoreSizeInBits() const {
+-      return getStoreSize() * 8;
++      return getStoreSize() * BitsPerByte;
+     }
+ 
+     /// getRoundIntegerType - Rounds the bit-width of the given integer EVT up
+@@ -281,8 +294,8 @@ namespace llvm {
+     EVT getRoundIntegerType(LLVMContext &Context) const {
+       assert(isInteger() && !isVector() && "Invalid integer type!");
+       unsigned BitWidth = getSizeInBits();
+-      if (BitWidth <= 8)
+-        return EVT(MVT::i8);
++      if (BitWidth <= BitsPerByte)
++        return EVT(MVT::getIntegerVT(BitsPerByte));
+       return getIntegerVT(Context, 1 << Log2_32_Ceil(BitWidth));
+     }
+ 
+diff --git a/include/llvm/IR/DataLayout.h b/include/llvm/IR/DataLayout.h
+index dc95798..b056f00 100644
+--- a/include/llvm/IR/DataLayout.h
++++ b/include/llvm/IR/DataLayout.h
+@@ -184,6 +184,24 @@ private:
+   // Free all internal data structures.
+   void clear();
+ 
++  /// Return the largest pointer size for known address spaces.
++  unsigned getMaxPointerSize() const {
++    unsigned MaxPtrSize = 0;
++    for (PointersTy::const_iterator I = Pointers.begin(), E = Pointers.end();
++         I != E; ++I) {
++      MaxPtrSize = std::max(MaxPtrSize, I->TypeByteWidth);
++    }
++
++    return (MaxPtrSize == 0) ? 64 : MaxPtrSize;
++  }
++
++  /// Convert number of bits into number of octets.
++  uint64_t inOctets(uint64_t Bits) const {
++    assert((Bits % 8 == 0) &&
++           "number of bits must be an octet width multiple");
++    return (Bits + 8 - 1) / 8;
++  }
++
+ public:
+   /// Constructs a DataLayout from a specification string. See reset().
+   explicit DataLayout(StringRef LayoutDescription) : LayoutMap(nullptr) {
+@@ -236,6 +254,9 @@ public:
+     return (Bits + BitsPerByte - 1) / BitsPerByte;
+   }
+ 
++  // FIXME: remove?
++  unsigned getBitsPerByte() const { return BitsPerByte; }
++
+   /// \brief Returns the string representation of the DataLayout.
+   ///
+   /// This representation is in the same format accepted by the string
+@@ -359,6 +380,12 @@ public:
+     return PTy && isNonIntegralPointerType(PTy);
+   }
+ 
++  /// Return the largest pointer size for known address spaces. ('address_space'
++  /// in DWARF.)
++  unsigned getMaxPointerSizeInOctets() const {
++    return inOctets(inBits(getMaxPointerSize()));
++  }
++
+   /// Layout pointer size, in bits
+   /// FIXME: The defaults need to be removed once all of
+   /// the backends/clients are updated.
+diff --git a/include/llvm/IR/IRBuilder.h b/include/llvm/IR/IRBuilder.h
+index 5a41b5a..11a01be 100644
+--- a/include/llvm/IR/IRBuilder.h
++++ b/include/llvm/IR/IRBuilder.h
+@@ -19,6 +19,7 @@
+ #include "llvm/ADT/None.h"
+ #include "llvm/ADT/StringRef.h"
+ #include "llvm/ADT/Twine.h"
++#include "llvm/CodeGen/ValueTypes.h"
+ #include "llvm/IR/BasicBlock.h"
+ #include "llvm/IR/Constant.h"
+ #include "llvm/IR/ConstantFolder.h"
+@@ -382,6 +383,12 @@ public:
+   }
+ 
+   /// \brief Fetch the type representing a pointer to an 8-bit integer value.
++  //XXXcsa Since llvm_ptr_ty is still an i8* this must stay even on Phoenix
++  //       For a complete solution it should of course be removed but since
++  //       "a lot" of code must be changed to use a new , e.g. the below,
++  //       function before it can be removed.
++  //       Or perhaps it is just "redefined" to just do an byte
++  //       size pointer instead if an i8...
+   PointerType *getInt8PtrTy(unsigned AddrSpace = 0) {
+     return Type::getInt8PtrTy(Context, AddrSpace);
+   }
+@@ -391,6 +398,14 @@ public:
+     return DL.getIntPtrType(Context, AddrSpace);
+   }
+ 
++  // XXXcsa Ugly to introduce EVT here but TargetData must be even worse.
++  //        Perhaps the byte size should also be present in the Type class?
++  PointerType *getIntByteSizePtrTy(unsigned AddrSpace = 0) {
++    IntegerType* ByteSizedInt =
++      IntegerType::get(Context, EVT::getBitsPerByte());
++    return ByteSizedInt->getPointerTo(AddrSpace);
++  }
++
+   //===--------------------------------------------------------------------===//
+   // Intrinsic creation methods
+   //===--------------------------------------------------------------------===//
+@@ -567,6 +582,7 @@ private:
+                                   const Twine &Name = "");
+ 
+   Value *getCastedInt8PtrValue(Value *Ptr);
++  Value *getCastedIntByteSizePtrValue(Value *Ptr);
+ };
+ 
+ /// \brief This provides a uniform API for creating instructions and inserting
+diff --git a/lib/Analysis/ConstantFolding.cpp b/lib/Analysis/ConstantFolding.cpp
+index 7386727..9d9abab 100644
+--- a/lib/Analysis/ConstantFolding.cpp
++++ b/lib/Analysis/ConstantFolding.cpp
+@@ -329,6 +329,7 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,
+                         unsigned BytesLeft, const DataLayout &DL) {
+   assert(ByteOffset <= DL.getTypeAllocSize(C->getType()) &&
+          "Out of range access");
++  unsigned BitsPerByte = DL.getBitsPerByte();
+ 
+   // If this element is zero or undefined, we can just return since *CurPtr is
+   // zero initialized.
+@@ -337,11 +338,11 @@ bool ReadDataFromGlobal(Constant *C, uint64_t ByteOffset, unsigned char *CurPtr,
+ 
+   if (auto *CI = dyn_cast<ConstantInt>(C)) {
+     if (CI->getBitWidth() > 64 ||
+-        (CI->getBitWidth() & 7) != 0)
++        (CI->getBitWidth() & (BitsPerByte-1)) != 0)
+       return false;
+ 
+     uint64_t Val = CI->getZExtValue();
+-    unsigned IntBytes = unsigned(CI->getBitWidth()/8);
++    unsigned IntBytes = unsigned(CI->getBitWidth()/BitsPerByte);
+ 
+     for (unsigned i = 0; i != BytesLeft && ByteOffset != IntBytes; ++i) {
+       int n = ByteOffset;
+@@ -617,11 +618,13 @@ Constant *llvm::ConstantFoldLoadFromConstPtr(Constant *C, Type *Ty,
+   // directly if string length is small enough.
+   StringRef Str;
+   if (getConstantStringInfo(CE, Str) && !Str.empty()) {
++    unsigned BitsPerByte = DL.getBitsPerByte();
+     size_t StrLen = Str.size();
+     unsigned NumBits = Ty->getPrimitiveSizeInBits();
+     // Replace load with immediate integer if the result is an integer or fp
+     // value.
+-    if ((NumBits >> 3) == StrLen + 1 && (NumBits & 7) == 0 &&
++    if ((NumBits / BitsPerByte) ==
++        StrLen + 1 && (NumBits & (BitsPerByte-1)) == 0 &&
+         (isa<IntegerType>(Ty) || Ty->isFloatingPointTy())) {
+       APInt StrVal(NumBits, 0);
+       APInt SingleChar(NumBits, 0);
+@@ -807,6 +810,7 @@ Constant *SymbolicallyEvaluateGEP(const GEPOperator *GEP,
+     return nullptr;
+ 
+   Type *IntPtrTy = DL.getIntPtrType(Ptr->getType());
++  unsigned BitsPerByte = DL.getBitsPerByte();
+ 
+   // If this is a constant expr gep that is effectively computing an
+   // "offsetof", fold it into 'cast int Size to T*' instead of 'gep 0, 0, 12'
+@@ -815,7 +819,7 @@ Constant *SymbolicallyEvaluateGEP(const GEPOperator *GEP,
+ 
+       // If this is "gep i8* Ptr, (sub 0, V)", fold this as:
+       // "inttoptr (sub (ptrtoint Ptr), V)"
+-      if (Ops.size() == 2 && ResElemTy->isIntegerTy(8)) {
++      if (Ops.size() == 2 && ResElemTy->isIntegerTy(BitsPerByte)) {
+         auto *CE = dyn_cast<ConstantExpr>(Ops[1]);
+         assert((!CE || CE->getType() == IntPtrTy) &&
+                "CastGEPIndices didn't canonicalize index types!");
+diff --git a/lib/Analysis/ValueTracking.cpp b/lib/Analysis/ValueTracking.cpp
+index 0053623..23851f3 100644
+--- a/lib/Analysis/ValueTracking.cpp
++++ b/lib/Analysis/ValueTracking.cpp
+@@ -38,6 +38,7 @@
+ #include "llvm/IR/Statepoint.h"
+ #include "llvm/Support/Debug.h"
+ #include "llvm/Support/MathExtras.h"
++#include "llvm/CodeGen/ValueTypes.h"
+ #include <algorithm>
+ #include <array>
+ #include <cstring>
+@@ -2694,19 +2695,22 @@ bool llvm::SignBitMustBeZero(const Value *V, const TargetLibraryInfo *TLI) {
+   return cannotBeOrderedLessThanZeroImpl(V, TLI, true, 0);
+ }
+ 
++/// XXXcsa name kept, i.e. byte equal least byte size
+ /// If the specified value can be set by repeating the same byte in memory,
+-/// return the i8 value that it is represented with.  This is
+-/// true for all i8 values obviously, but is also true for i32 0, i32 -1,
++/// return the byte value that it is represented with.  This is
++/// true for all byte values obviously, but is also true for i32 0, i32 -1,
+ /// i16 0xF0F0, double 0.0 etc.  If the value can't be handled with a repeated
+-/// byte store (e.g. i16 0x1234), return null.
++/// byte store (e.g. i16 0x1234 if a byte is byte), return null.
+ Value *llvm::isBytewiseValue(Value *V) {
+-  // All byte-wide stores are splatable, even of arbitrary variables.
+-  if (V->getType()->isIntegerTy(8)) return V;
++  unsigned numBits = EVT::getBitsPerByte();
++  // All least byte-size stores are splatable, even of arbitrary
++  // variables.
++  if (V->getType()->isIntegerTy(numBits)) return V;
+ 
+   // Handle 'null' ConstantArrayZero etc.
+   if (Constant *C = dyn_cast<Constant>(V))
+     if (C->isNullValue())
+-      return Constant::getNullValue(Type::getInt8Ty(V->getContext()));
++      return Constant::getNullValue(Type::getIntNTy(V->getContext(), numBits));
+ 
+   // Constant float and double values can be handled as integer values if the
+   // corresponding integer value is "byteable".  An important case is 0.0.
+@@ -2718,14 +2722,14 @@ Value *llvm::isBytewiseValue(Value *V) {
+     // Don't handle long double formats, which have strange constraints.
+   }
+ 
+-  // We can handle constant integers that are multiple of 8 bits.
++  // We can handle constant integers that are multiple of byte-size bits.
+   if (ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
+-    if (CI->getBitWidth() % 8 == 0) {
+-      assert(CI->getBitWidth() > 8 && "8 bits should be handled above!");
++    if (CI->getBitWidth() % numBits == 0) {
++      assert(CI->getBitWidth() > numBits && "byte-size bits should be handled above!");
+ 
+-      if (!CI->getValue().isSplat(8))
++      if (!CI->getValue().isSplat(numBits))
+         return nullptr;
+-      return ConstantInt::get(V->getContext(), CI->getValue().trunc(8));
++      return ConstantInt::get(V->getContext(), CI->getValue().trunc(numBits));
+     }
+   }
+ 
+diff --git a/lib/CodeGen/AsmPrinter/AsmPrinter.cpp b/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+index 821e336..069e9cc 100644
+--- a/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
++++ b/lib/CodeGen/AsmPrinter/AsmPrinter.cpp
+@@ -1692,13 +1692,31 @@ void AsmPrinter::EmitInt8(int Value) const {
+ /// EmitInt16 - Emit a short directive and value.
+ ///
+ void AsmPrinter::EmitInt16(int Value) const {
+-  OutStreamer->EmitIntValue(Value, 2);
++  // XXX: How to get DataLayout? The getDataLayout method
++  // relies on the MMI member being initialized. E.g when running
++  // dsymutil basic tests MMI is null.
++  unsigned UnitSize;
++  if (MMI != nullptr)
++    UnitSize = getDataLayout().inBytes(16);
++  else
++    // Assume 8bit byte
++    UnitSize = 2;
++  OutStreamer->EmitIntValue(Value, UnitSize);
+ }
+ 
+ /// EmitInt32 - Emit a long directive and value.
+ ///
+ void AsmPrinter::EmitInt32(int Value) const {
+-  OutStreamer->EmitIntValue(Value, 4);
++  // XXX: How to get DataLayout? The getDataLayout method
++  // relies on the MMI member being initialized. E.g when running
++  // dsymutil basic tests MMI is null.
++  unsigned UnitSize;
++  if (MMI != nullptr)
++    UnitSize = getDataLayout().inBytes(32);
++  else
++    // Assume 8bit byte
++    UnitSize = 4;
++  OutStreamer->EmitIntValue(Value, UnitSize);
+ }
+ 
+ /// Emit something like ".long Hi-Lo" where the size in bytes of the directive
+@@ -1933,13 +1951,34 @@ static int isRepeatedByteSequence(const Value *V, const DataLayout &DL) {
+   if (const ConstantInt *CI = dyn_cast<ConstantInt>(V)) {
+     uint64_t Size = DL.getTypeAllocSizeInBits(V->getType());
+     assert(Size % 8 == 0);
++    unsigned AddrUnitSize = DL.getBitsPerByte();
+ 
++    if (AddrUnitSize == 8) {
+     // Extend the element to take zero padding into account.
+     APInt Value = CI->getValue().zextOrSelf(Size);
+     if (!Value.isSplat(8))
+       return -1;
+-
+     return Value.zextOrTrunc(8).getZExtValue();
++    } else if (AddrUnitSize == 16) {
++      uint64_t Value = CI->getZExtValue();
++      typedef uint16_t AddrUnit;
++      uint16_t Byte = static_cast<AddrUnit>(Value);
++      for (unsigned i = 1; i < Size; ++i) {
++        Value >>= AddrUnitSize;
++        if (static_cast<AddrUnit>(Value) != Byte) return -1;
++      }
++      // XXX: the value returned by this function is passed on to emitFill, in a
++      // uint8_t parameter, so repeated values where the high 8 bits are
++      // non-zero cannot currently be handled
++      if ((Byte & 0xff00u) != 0)
++        return -1;
++
++      return Byte;
++    } else {
++      // Extend with handling of different addressunit sizes if needed.
++      // For now, just pretend like there is no repeated sequence.
++      return -1;
++    }
+   }
+   if (const ConstantArray *CA = dyn_cast<ConstantArray>(V)) {
+     // Make sure all array elements are sequences of the same repeated
+@@ -1981,7 +2020,7 @@ static void emitGlobalConstantDataSequential(const DataLayout &DL,
+     return AP.OutStreamer->EmitBytes(CDS->getAsString());
+ 
+   // Otherwise, emit the values in successive locations.
+-  unsigned ElementByteSize = CDS->getElementByteSize();
++  uint64_t ElementByteSize = DL.getTypeAllocSize(CDS->getElementType());
+   if (isa<IntegerType>(CDS->getElementType())) {
+     for (unsigned i = 0, e = CDS->getNumElements(); i != e; ++i) {
+       if (AP.isVerbose())
+@@ -2081,7 +2120,8 @@ static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP) {
+   // Now iterate through the APInt chunks, emitting them in endian-correct
+   // order, possibly with a smaller chunk at beginning/end (e.g. for x87 80-bit
+   // floats).
+-  unsigned NumBytes = API.getBitWidth() / 8;
++  const DataLayout &DL = AP.getDataLayout();
++  unsigned NumBytes = API.getBitWidth() / DL.getBitsPerByte();
+   unsigned TrailingBytes = NumBytes % sizeof(uint64_t);
+   const uint64_t *p = API.getRawData();
+ 
+@@ -2105,7 +2145,6 @@ static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP) {
+   }
+ 
+   // Emit the tail padding for the long double.
+-  const DataLayout &DL = AP.getDataLayout();
+   AP.OutStreamer->EmitZeros(DL.getTypeAllocSize(CFP->getType()) -
+                             DL.getTypeStoreSize(CFP->getType()));
+ }
+@@ -2150,7 +2189,7 @@ static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP) {
+   const uint64_t *RawData = Realigned.getRawData();
+   for (unsigned i = 0, e = BitWidth / 64; i != e; ++i) {
+     uint64_t Val = DL.isBigEndian() ? RawData[e - i - 1] : RawData[i];
+-    AP.OutStreamer->EmitIntValue(Val, 8);
++    AP.OutStreamer->EmitIntValue(Val, 64 / DL.getBitsPerByte());
+   }
+ 
+   if (ExtraBitsSize) {
+@@ -2280,11 +2319,14 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
+     case 2:
+     case 4:
+     case 8:
++      if (Size < 8 || DL.getBitsPerByte() == 8) {
+       if (AP.isVerbose())
+         AP.OutStreamer->GetCommentOS() << format("0x%" PRIx64 "\n",
+                                                  CI->getZExtValue());
+       AP.OutStreamer->EmitIntValue(CI->getZExtValue(), Size);
+       return;
++      }
++      // Intended fallthrough
+     default:
+       emitGlobalConstantLargeInt(CI, AP);
+       return;
+diff --git a/lib/CodeGen/AsmPrinter/DIE.cpp b/lib/CodeGen/AsmPrinter/DIE.cpp
+index a8a3b30..a321100 100644
+--- a/lib/CodeGen/AsmPrinter/DIE.cpp
++++ b/lib/CodeGen/AsmPrinter/DIE.cpp
+@@ -349,6 +349,20 @@ void DIEValue::dump() const {
+ // DIEInteger Implementation
+ //===----------------------------------------------------------------------===//
+ 
++// Number of bytes to represent an address. (address_size)
++static uint64_t getAddrSize(const AsmPrinter *AP) {
++  // XXX: How to get DataLayout? The getDataLayout method
++  // relies on the MMI member being initialized. E.g when running
++  // dsymutil basic tests MMI is null.
++
++  if (AP->MMI != nullptr) {
++    const DataLayout &DL = AP->getDataLayout();
++    return DL.getMaxPointerSizeInOctets();
++  }
++  else
++    return AP->getPointerSize();
++}
++
+ /// EmitValue - Emit integer of appropriate size.
+ ///
+ void DIEInteger::EmitValue(const AsmPrinter *Asm, dwarf::Form Form) const {
+@@ -519,7 +533,7 @@ unsigned DIELabel::SizeOf(const AsmPrinter *AP, dwarf::Form Form) const {
+   if (Form == dwarf::DW_FORM_data4) return 4;
+   if (Form == dwarf::DW_FORM_sec_offset) return 4;
+   if (Form == dwarf::DW_FORM_strp) return 4;
+-  return AP->getPointerSize();
++  return getAddrSize(AP);
+ }
+ 
+ LLVM_DUMP_METHOD
+@@ -541,7 +555,7 @@ unsigned DIEDelta::SizeOf(const AsmPrinter *AP, dwarf::Form Form) const {
+   if (Form == dwarf::DW_FORM_data4) return 4;
+   if (Form == dwarf::DW_FORM_sec_offset) return 4;
+   if (Form == dwarf::DW_FORM_strp) return 4;
+-  return AP->getPointerSize();
++  return getAddrSize(AP);
+ }
+ 
+ LLVM_DUMP_METHOD
+diff --git a/lib/CodeGen/AsmPrinter/DwarfUnit.cpp b/lib/CodeGen/AsmPrinter/DwarfUnit.cpp
+index 2a866c0..c926591 100644
+--- a/lib/CodeGen/AsmPrinter/DwarfUnit.cpp
++++ b/lib/CodeGen/AsmPrinter/DwarfUnit.cpp
+@@ -1376,6 +1376,8 @@ void DwarfUnit::constructContainingTypeDIEs() {
+ void DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
+   DIE &MemberDie = createAndAddDIE(DT->getTag(), Buffer);
+   StringRef Name = DT->getName();
++  auto BitsPerByte = Asm->getDataLayout().getBitsPerByte();
++
+   if (!Name.empty())
+     addString(MemberDie, dwarf::DW_AT_name, Name);
+ 
+@@ -1407,9 +1409,8 @@ void DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
+ 
+     bool IsBitfield = FieldSize && Size != FieldSize;
+     if (IsBitfield) {
+-      // Handle bitfield, assume bytes are 8 bits.
+       if (DD->useDWARF2Bitfields())
+-        addUInt(MemberDie, dwarf::DW_AT_byte_size, None, FieldSize/8);
++        addUInt(MemberDie, dwarf::DW_AT_byte_size, None, FieldSize/BitsPerByte);
+       addUInt(MemberDie, dwarf::DW_AT_bit_size, None, Size);
+ 
+       uint64_t Offset = DT->getOffsetInBits();
+@@ -1421,7 +1422,7 @@ void DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
+       // The bits from the start of the storage unit to the start of the field.
+       uint64_t StartBitOffset = Offset - (Offset & AlignMask);
+       // The byte offset of the field's aligned storage unit inside the struct.
+-      OffsetInBytes = (Offset - StartBitOffset) / 8;
++      OffsetInBytes = (Offset - StartBitOffset) / BitsPerByte;
+ 
+       if (DD->useDWARF2Bitfields()) {
+         uint64_t HiMark = (Offset + FieldSize) & AlignMask;
+@@ -1439,7 +1440,7 @@ void DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
+       }
+     } else {
+       // This is not a bitfield.
+-      OffsetInBytes = DT->getOffsetInBits() / 8;
++      OffsetInBytes = DT->getOffsetInBits() / BitsPerByte;
+       if (AlignInBytes)
+         addUInt(MemberDie, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
+                 AlignInBytes);
+diff --git a/lib/CodeGen/MachineFunction.cpp b/lib/CodeGen/MachineFunction.cpp
+index c1d5ea9..dad76a3 100644
+--- a/lib/CodeGen/MachineFunction.cpp
++++ b/lib/CodeGen/MachineFunction.cpp
+@@ -977,7 +977,7 @@ unsigned MachineJumpTableInfo::getEntrySize(const DataLayout &TD) const {
+   case MachineJumpTableInfo::EK_GPRel32BlockAddress:
+   case MachineJumpTableInfo::EK_LabelDifference32:
+   case MachineJumpTableInfo::EK_Custom32:
+-    return 4;
++    return 32 / TD.getBitsPerByte();
+   case MachineJumpTableInfo::EK_Inline:
+     return 0;
+   }
+diff --git a/lib/CodeGen/SelectionDAG/DAGCombiner.cpp b/lib/CodeGen/SelectionDAG/DAGCombiner.cpp
+index dad94c5..e08ca13 100644
+--- a/lib/CodeGen/SelectionDAG/DAGCombiner.cpp
++++ b/lib/CodeGen/SelectionDAG/DAGCombiner.cpp
+@@ -7164,7 +7164,9 @@ SDValue DAGCombiner::ReduceLoadWidth(SDNode *N) {
+     ShAmt = LVTStoreBits - EVTStoreBits - ShAmt;
+   }
+ 
+-  uint64_t PtrOff = ShAmt / 8;
++  const DataLayout &TD = DAG.getDataLayout();
++
++  uint64_t PtrOff = ShAmt / TD.getBitsPerByte();
+   unsigned NewAlign = MinAlign(LN0->getAlignment(), PtrOff);
+   SDLoc DL(LN0);
+   // The original load itself didn't wrap, so an offset within it doesn't.
+@@ -7607,7 +7609,7 @@ SDValue DAGCombiner::CombineConsecutiveLoads(SDNode *N, EVT VT) {
+       LD1->getAddressSpace() != LD2->getAddressSpace())
+     return SDValue();
+   EVT LD1VT = LD1->getValueType(0);
+-  unsigned LD1Bytes = LD1VT.getSizeInBits() / 8;
++  unsigned LD1Bytes = LD1VT.getSize();
+   if (ISD::isNON_EXTLoad(LD2) && LD2->hasOneUse() &&
+       DAG.areNonVolatileConsecutiveLoads(LD2, LD1, LD1Bytes, 1)) {
+     unsigned Align = LD1->getAlignment();
+@@ -11022,6 +11024,7 @@ bool DAGCombiner::SliceUpLoad(SDNode *N) {
+ static std::pair<unsigned, unsigned>
+ CheckForMaskedLoad(SDValue V, SDValue Ptr, SDValue Chain) {
+   std::pair<unsigned, unsigned> Result(0, 0);
++  unsigned BitsPerByte = EVT::getBitsPerByte();
+ 
+   // Check for the structure we're looking for.
+   if (V->getOpcode() != ISD::AND ||
+@@ -11060,9 +11063,9 @@ CheckForMaskedLoad(SDValue V, SDValue Ptr, SDValue Chain) {
+   // follow the sign bit for uniformity.
+   uint64_t NotMask = ~cast<ConstantSDNode>(V->getOperand(1))->getSExtValue();
+   unsigned NotMaskLZ = countLeadingZeros(NotMask);
+-  if (NotMaskLZ & 7) return Result;  // Must be multiple of a byte.
++  if (NotMaskLZ & (BitsPerByte-1)) return Result;  // Must be multiple of a byte.
+   unsigned NotMaskTZ = countTrailingZeros(NotMask);
+-  if (NotMaskTZ & 7) return Result;  // Must be multiple of a byte.
++  if (NotMaskTZ & (BitsPerByte-1)) return Result;  // Must be multiple of a byte.
+   if (NotMaskLZ == 64) return Result;  // All zero mask.
+ 
+   // See if we have a continuous run of bits.  If so, we have 0*1+0*
+@@ -11073,7 +11076,7 @@ CheckForMaskedLoad(SDValue V, SDValue Ptr, SDValue Chain) {
+   if (V.getValueType() != MVT::i64 && NotMaskLZ)
+     NotMaskLZ -= 64-V.getValueSizeInBits();
+ 
+-  unsigned MaskedBytes = (V.getValueSizeInBits()-NotMaskLZ-NotMaskTZ)/8;
++  unsigned MaskedBytes = (V.getValueSizeInBits()-NotMaskLZ-NotMaskTZ)/BitsPerByte;
+   switch (MaskedBytes) {
+   case 1:
+   case 2:
+@@ -11083,10 +11086,10 @@ CheckForMaskedLoad(SDValue V, SDValue Ptr, SDValue Chain) {
+ 
+   // Verify that the first bit starts at a multiple of mask so that the access
+   // is aligned the same as the access width.
+-  if (NotMaskTZ && NotMaskTZ/8 % MaskedBytes) return Result;
++  if (NotMaskTZ && NotMaskTZ/BitsPerByte % MaskedBytes) return Result;
+ 
+   Result.first = MaskedBytes;
+-  Result.second = NotMaskTZ/8;
++  Result.second = NotMaskTZ/BitsPerByte;
+   return Result;
+ }
+ 
+@@ -11098,6 +11101,7 @@ static SDNode *
+ ShrinkLoadReplaceStoreWithStore(const std::pair<unsigned, unsigned> &MaskInfo,
+                                 SDValue IVal, StoreSDNode *St,
+                                 DAGCombiner *DC) {
++  unsigned BitsPerByte = EVT::getBitsPerByte();
+   unsigned NumBytes = MaskInfo.first;
+   unsigned ByteShift = MaskInfo.second;
+   SelectionDAG &DAG = DC->getDAG();
+@@ -11105,13 +11109,14 @@ ShrinkLoadReplaceStoreWithStore(const std::pair<unsigned, unsigned> &MaskInfo,
+   // Check to see if IVal is all zeros in the part being masked in by the 'or'
+   // that uses this.  If not, this is not a replacement.
+   APInt Mask = ~APInt::getBitsSet(IVal.getValueSizeInBits(),
+-                                  ByteShift*8, (ByteShift+NumBytes)*8);
++                                  ByteShift*BitsPerByte,
++                                  (ByteShift+NumBytes)*BitsPerByte);
+   if (!DAG.MaskedValueIsZero(IVal, Mask)) return nullptr;
+ 
+   // Check that it is legal on the target to do this.  It is legal if the new
+   // VT we're shrinking to (i8/i16/i32) is legal or we're still before type
+   // legalization.
+-  MVT VT = MVT::getIntegerVT(NumBytes*8);
++  MVT VT = MVT::getIntegerVT(NumBytes*BitsPerByte);
+   if (!DC->isTypeLegal(VT))
+     return nullptr;
+ 
+@@ -11120,7 +11125,7 @@ ShrinkLoadReplaceStoreWithStore(const std::pair<unsigned, unsigned> &MaskInfo,
+   if (ByteShift) {
+     SDLoc DL(IVal);
+     IVal = DAG.getNode(ISD::SRL, DL, IVal.getValueType(), IVal,
+-                       DAG.getConstant(ByteShift*8, DL,
++                       DAG.getConstant(ByteShift*BitsPerByte, DL,
+                                     DC->getShiftAmountTy(IVal.getValueType())));
+   }
+ 
+@@ -11231,6 +11236,7 @@ SDValue DAGCombiner::ReduceLoadOpStoreWidth(SDNode *N) {
+ 
+     // If the lsb changed does not start at the type bitwidth boundary,
+     // start at the previous one.
++    unsigned BitsPerByte = EVT::getBitsPerByte();
+     if (ShAmt % NewBW)
+       ShAmt = (((ShAmt + NewBW - 1) / NewBW) * NewBW) - NewBW;
+     APInt Mask = APInt::getBitsSet(BitWidth, ShAmt,
+@@ -11239,11 +11245,12 @@ SDValue DAGCombiner::ReduceLoadOpStoreWidth(SDNode *N) {
+       APInt NewImm = (Imm & Mask).lshr(ShAmt).trunc(NewBW);
+       if (Opc == ISD::AND)
+         NewImm ^= APInt::getAllOnesValue(NewBW);
+-      uint64_t PtrOff = ShAmt / 8;
++      uint64_t PtrOff = ShAmt / BitsPerByte;
+       // For big endian targets, we need to adjust the offset to the pointer to
+       // load the correct bytes.
+       if (DAG.getDataLayout().isBigEndian())
+-        PtrOff = (BitWidth + 7 - NewBW) / 8 - PtrOff;
++        PtrOff = (BitWidth + (BitsPerByte-1) - NewBW) /
++          BitsPerByte - PtrOff;
+ 
+       unsigned NewAlign = MinAlign(LD->getAlignment(), PtrOff);
+       Type *NewVTTy = NewVT.getTypeForEVT(*DAG.getContext());
+@@ -11694,12 +11701,12 @@ bool DAGCombiner::MergeConsecutiveStores(
+     return false;
+ 
+   EVT MemVT = St->getMemoryVT();
+-  int64_t ElementSizeBytes = MemVT.getSizeInBits() / 8;
++  int64_t ElementSizeBytes = MemVT.getSizeInBits() / EVT::getBitsPerByte();
+   bool NoVectors = DAG.getMachineFunction().getFunction()->hasFnAttribute(
+       Attribute::NoImplicitFloat);
+ 
+   // This function cannot currently deal with non-byte-sized memory sizes.
+-  if (ElementSizeBytes * 8 != MemVT.getSizeInBits())
++  if (ElementSizeBytes * EVT::getBitsPerByte() != MemVT.getSizeInBits())
+     return false;
+ 
+   if (!MemVT.isSimple())
+@@ -12569,7 +12576,8 @@ SDValue DAGCombiner::ReplaceExtractVectorEltOfLoadWithNarrowedLoad(
+   SDLoc DL(EVE);
+   if (auto *ConstEltNo = dyn_cast<ConstantSDNode>(EltNo)) {
+     int Elt = ConstEltNo->getZExtValue();
+-    unsigned PtrOff = VecEltVT.getSizeInBits() * Elt / 8;
++    unsigned BitsPerByte = EVT::getBitsPerByte();
++    unsigned PtrOff = VecEltVT.getSizeInBits() * Elt / BitsPerByte;
+     Offset = DAG.getConstant(PtrOff, DL, PtrType);
+     MPI = OriginalLoad->getPointerInfo().getWithOffset(PtrOff);
+   } else {
+diff --git a/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp b/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp
+index b002825..76634de 100644
+--- a/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp
++++ b/lib/CodeGen/SelectionDAG/LegalizeDAG.cpp
+@@ -512,7 +512,8 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
+         assert(RoundWidth < StWidth);
+         unsigned ExtraWidth = StWidth - RoundWidth;
+         assert(ExtraWidth < RoundWidth);
+-        assert(!(RoundWidth % 8) && !(ExtraWidth % 8) &&
++        assert(!(RoundWidth % EVT::getBitsPerByte()) &&
++               !(ExtraWidth % EVT::getBitsPerByte()) &&
+                "Store size not an integral number of bytes!");
+         EVT RoundVT = EVT::getIntegerVT(*DAG.getContext(), RoundWidth);
+         EVT ExtraVT = EVT::getIntegerVT(*DAG.getContext(), ExtraWidth);
+@@ -526,7 +527,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
+                                  RoundVT, Alignment, MMOFlags, AAInfo);
+ 
+           // Store the remaining ExtraWidth bits.
+-          IncrementSize = RoundWidth / 8;
++          IncrementSize = RoundWidth / EVT::getBitsPerByte();
+           Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                             DAG.getConstant(IncrementSize, dl,
+                                             Ptr.getValueType()));
+@@ -550,7 +551,7 @@ void SelectionDAGLegalize::LegalizeStoreOps(SDNode *Node) {
+                                  RoundVT, Alignment, MMOFlags, AAInfo);
+ 
+           // Store the remaining ExtraWidth bits.
+-          IncrementSize = RoundWidth / 8;
++          IncrementSize = RoundWidth / EVT::getBitsPerByte();
+           Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                             DAG.getConstant(IncrementSize, dl,
+                                             Ptr.getValueType()));
+@@ -715,7 +716,8 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
+     assert(RoundWidth < SrcWidth);
+     unsigned ExtraWidth = SrcWidth - RoundWidth;
+     assert(ExtraWidth < RoundWidth);
+-    assert(!(RoundWidth % 8) && !(ExtraWidth % 8) &&
++    assert(!(RoundWidth % EVT::getBitsPerByte()) &&
++           !(ExtraWidth % EVT::getBitsPerByte()) &&
+            "Load size not an integral number of bytes!");
+     EVT RoundVT = EVT::getIntegerVT(*DAG.getContext(), RoundWidth);
+     EVT ExtraVT = EVT::getIntegerVT(*DAG.getContext(), ExtraWidth);
+@@ -731,7 +733,7 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
+                           AAInfo);
+ 
+       // Load the remaining ExtraWidth bits.
+-      IncrementSize = RoundWidth / 8;
++      IncrementSize = RoundWidth / EVT::getBitsPerByte();
+       Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                          DAG.getConstant(IncrementSize, dl,
+                                          Ptr.getValueType()));
+@@ -762,7 +764,7 @@ void SelectionDAGLegalize::LegalizeLoadOps(SDNode *Node) {
+                           AAInfo);
+ 
+       // Load the remaining ExtraWidth bits.
+-      IncrementSize = RoundWidth / 8;
++      IncrementSize = RoundWidth / EVT::getBitsPerByte();
+       Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                          DAG.getConstant(IncrementSize, dl,
+                                          Ptr.getValueType()));
+@@ -1279,7 +1281,7 @@ SDValue SelectionDAGLegalize::ExpandVectorBuildThroughStack(SDNode* Node) {
+ 
+   // Emit a store of each element to the stack slot.
+   SmallVector<SDValue, 8> Stores;
+-  unsigned TypeByteSize = EltVT.getSizeInBits() / 8;
++  unsigned TypeByteSize = EltVT.getSize();
+   // Store (in the right endianness) the elements to memory.
+   for (unsigned i = 0, e = Node->getNumOperands(); i != e; ++i) {
+     // Ignore undef elements.
+@@ -1366,7 +1368,7 @@ void SelectionDAGLegalize::getSignAsIntValue(FloatSignAsInt &State,
+     State.IntPointerInfo = State.FloatPointerInfo;
+   } else {
+     // Advance the pointer so that the loaded byte will contain the sign bit.
+-    unsigned ByteOffset = (FloatVT.getSizeInBits() / 8) - 1;
++    unsigned ByteOffset = (FloatVT.getSizeInBits() / EVT::getBitsPerByte()) - 1;
+     IntPtr = DAG.getNode(ISD::ADD, DL, StackPtr.getValueType(), StackPtr,
+                       DAG.getConstant(ByteOffset, DL, StackPtr.getValueType()));
+     State.IntPointerInfo = MachinePointerInfo::getFixedStack(MF, FI,
+@@ -2644,7 +2646,7 @@ SDValue SelectionDAGLegalize::ExpandBitCount(unsigned Opc, SDValue Op,
+     EVT ShVT = TLI.getShiftAmountTy(VT, DAG.getDataLayout());
+     unsigned Len = VT.getSizeInBits();
+ 
+-    assert(VT.isInteger() && Len <= 128 && Len % 8 == 0 &&
++    assert(VT.isInteger() && Len <= 128 && Len % DAG.getDataLayout().getBitsPerByte() == 0 &&
+            "CTPOP not implemented for this type.");
+ 
+     // This is the "best" algorithm from
+@@ -2681,7 +2683,7 @@ SDValue SelectionDAGLegalize::ExpandBitCount(unsigned Opc, SDValue Op,
+     // v = (v * 0x01010101...) >> (Len - 8)
+     Op = DAG.getNode(ISD::SRL, dl, VT,
+                      DAG.getNode(ISD::MUL, dl, VT, Op, Mask01),
+-                     DAG.getConstant(Len - 8, dl, ShVT));
++                     DAG.getConstant(Len - DAG.getDataLayout().getBitsPerByte(), dl, ShVT));
+ 
+     return Op;
+   }
+@@ -3583,7 +3585,7 @@ bool SelectionDAGLegalize::ExpandNode(SDNode *Node) {
+     SDValue Addr = DAG.getNode(ISD::ADD, dl, Index.getValueType(),
+                                Index, Table);
+ 
+-    EVT MemVT = EVT::getIntegerVT(*DAG.getContext(), EntrySize * 8);
++    EVT MemVT = EVT::getIntegerVT(*DAG.getContext(), EntrySize * DAG.getDataLayout().getBitsPerByte());
+     SDValue LD = DAG.getExtLoad(
+         ISD::SEXTLOAD, dl, PTy, Chain, Addr,
+         MachinePointerInfo::getJumpTable(DAG.getMachineFunction()), MemVT);
+diff --git a/lib/CodeGen/SelectionDAG/LegalizeIntegerTypes.cpp b/lib/CodeGen/SelectionDAG/LegalizeIntegerTypes.cpp
+index dc436ce..64d9f59 100644
+--- a/lib/CodeGen/SelectionDAG/LegalizeIntegerTypes.cpp
++++ b/lib/CodeGen/SelectionDAG/LegalizeIntegerTypes.cpp
+@@ -2086,7 +2086,7 @@ void DAGTypeLegalizer::ExpandIntRes_LOAD(LoadSDNode *N,
+     EVT NEVT = EVT::getIntegerVT(*DAG.getContext(), ExcessBits);
+ 
+     // Increment the pointer to the other half.
+-    unsigned IncrementSize = NVT.getSizeInBits()/8;
++    unsigned IncrementSize = NVT.getSize();
+     Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                       DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+     Hi = DAG.getExtLoad(ExtType, dl, NVT, Ch, Ptr,
+@@ -2102,8 +2102,8 @@ void DAGTypeLegalizer::ExpandIntRes_LOAD(LoadSDNode *N,
+     // the cost of some bit-fiddling.
+     EVT MemVT = N->getMemoryVT();
+     unsigned EBytes = MemVT.getStoreSize();
+-    unsigned IncrementSize = NVT.getSizeInBits()/8;
+-    unsigned ExcessBits = (EBytes - IncrementSize)*8;
++    unsigned IncrementSize = NVT.getSize();
++    unsigned ExcessBits = (EBytes - IncrementSize)*EVT::getBitsPerByte();
+ 
+     // Load both the high bits and maybe some of the low bits.
+     Hi = DAG.getExtLoad(ExtType, dl, NVT, Ch, Ptr, N->getPointerInfo(),
+@@ -3057,7 +3057,7 @@ SDValue DAGTypeLegalizer::ExpandIntOp_STORE(StoreSDNode *N, unsigned OpNo) {
+     EVT NEVT = EVT::getIntegerVT(*DAG.getContext(), ExcessBits);
+ 
+     // Increment the pointer to the other half.
+-    unsigned IncrementSize = NVT.getSizeInBits()/8;
++    unsigned IncrementSize = NVT.getSize();
+     Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                       DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+     Hi = DAG.getTruncStore(
+@@ -3072,8 +3072,8 @@ SDValue DAGTypeLegalizer::ExpandIntOp_STORE(StoreSDNode *N, unsigned OpNo) {
+ 
+   EVT ExtVT = N->getMemoryVT();
+   unsigned EBytes = ExtVT.getStoreSize();
+-  unsigned IncrementSize = NVT.getSizeInBits()/8;
+-  unsigned ExcessBits = (EBytes - IncrementSize)*8;
++  unsigned IncrementSize = NVT.getSize();
++  unsigned ExcessBits = (EBytes - IncrementSize)*EVT::getBitsPerByte();
+   EVT HiVT = EVT::getIntegerVT(*DAG.getContext(),
+                                ExtVT.getSizeInBits() - ExcessBits);
+ 
+diff --git a/lib/CodeGen/SelectionDAG/LegalizeTypesGeneric.cpp b/lib/CodeGen/SelectionDAG/LegalizeTypesGeneric.cpp
+index 3682c32..998dda2 100644
+--- a/lib/CodeGen/SelectionDAG/LegalizeTypesGeneric.cpp
++++ b/lib/CodeGen/SelectionDAG/LegalizeTypesGeneric.cpp
+@@ -175,7 +175,7 @@ void DAGTypeLegalizer::ExpandRes_BITCAST(SDNode *N, SDValue &Lo, SDValue &Hi) {
+   Lo = DAG.getLoad(NOutVT, dl, Store, StackPtr, PtrInfo);
+ 
+   // Increment the pointer to the other half.
+-  unsigned IncrementSize = NOutVT.getSizeInBits() / 8;
++  unsigned IncrementSize = NOutVT.getSize();
+   StackPtr = DAG.getNode(ISD::ADD, dl, StackPtr.getValueType(), StackPtr,
+                          DAG.getConstant(IncrementSize, dl,
+                                          StackPtr.getValueType()));
+@@ -268,7 +268,7 @@ void DAGTypeLegalizer::ExpandRes_NormalLoad(SDNode *N, SDValue &Lo,
+                    LD->getMemOperand()->getFlags(), AAInfo);
+ 
+   // Increment the pointer to the other half.
+-  unsigned IncrementSize = NVT.getSizeInBits() / 8;
++  unsigned IncrementSize = NVT.getSize();
+   Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                     DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+   Hi = DAG.getLoad(NVT, dl, Chain, Ptr,
+@@ -475,7 +475,7 @@ SDValue DAGTypeLegalizer::ExpandOp_NormalStore(SDNode *N, unsigned OpNo) {
+   AAMDNodes AAInfo = St->getAAInfo();
+ 
+   assert(NVT.isByteSized() && "Expanded type not byte sized!");
+-  unsigned IncrementSize = NVT.getSizeInBits() / 8;
++  unsigned IncrementSize = NVT.getSize();
+ 
+   SDValue Lo, Hi;
+   GetExpandedOp(St->getValue(), Lo, Hi);
+diff --git a/lib/CodeGen/SelectionDAG/LegalizeVectorOps.cpp b/lib/CodeGen/SelectionDAG/LegalizeVectorOps.cpp
+index d4fa20f..6558791 100644
+--- a/lib/CodeGen/SelectionDAG/LegalizeVectorOps.cpp
++++ b/lib/CodeGen/SelectionDAG/LegalizeVectorOps.cpp
+@@ -28,6 +28,7 @@
+ //===----------------------------------------------------------------------===//
+ 
+ #include "llvm/CodeGen/SelectionDAG.h"
++#include "llvm/IR/DataLayout.h"
+ #include "llvm/Target/TargetLowering.h"
+ using namespace llvm;
+ 
+diff --git a/lib/CodeGen/SelectionDAG/LegalizeVectorTypes.cpp b/lib/CodeGen/SelectionDAG/LegalizeVectorTypes.cpp
+index 27a9ac3..cf727b5 100644
+--- a/lib/CodeGen/SelectionDAG/LegalizeVectorTypes.cpp
++++ b/lib/CodeGen/SelectionDAG/LegalizeVectorTypes.cpp
+@@ -1000,7 +1000,7 @@ void DAGTypeLegalizer::SplitVecRes_INSERT_VECTOR_ELT(SDNode *N, SDValue &Lo,
+       DAG.getLoad(Lo.getValueType(), dl, Store, StackPtr, MachinePointerInfo());
+ 
+   // Increment the pointer to the other part.
+-  unsigned IncrementSize = Lo.getValueSizeInBits() / 8;
++  unsigned IncrementSize = Lo.getValueType().getSize();
+   StackPtr = DAG.getNode(ISD::ADD, dl, StackPtr.getValueType(), StackPtr,
+                          DAG.getConstant(IncrementSize, dl,
+                                          StackPtr.getValueType()));
+@@ -1041,7 +1041,7 @@ void DAGTypeLegalizer::SplitVecRes_LOAD(LoadSDNode *LD, SDValue &Lo,
+   Lo = DAG.getLoad(ISD::UNINDEXED, ExtType, LoVT, dl, Ch, Ptr, Offset,
+                    LD->getPointerInfo(), LoMemVT, Alignment, MMOFlags, AAInfo);
+ 
+-  unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
++  unsigned IncrementSize = LoMemVT.getSize();
+   Ptr = DAG.getNode(ISD::ADD, dl, Ptr.getValueType(), Ptr,
+                     DAG.getConstant(IncrementSize, dl, Ptr.getValueType()));
+   Hi = DAG.getLoad(ISD::UNINDEXED, ExtType, HiVT, dl, Ch, Ptr, Offset,
+@@ -1837,7 +1837,7 @@ SDValue DAGTypeLegalizer::SplitVecOp_STORE(StoreSDNode *N, unsigned OpNo) {
+   EVT LoMemVT, HiMemVT;
+   std::tie(LoMemVT, HiMemVT) = DAG.GetSplitDestVTs(MemoryVT);
+ 
+-  unsigned IncrementSize = LoMemVT.getSizeInBits()/8;
++  unsigned IncrementSize = LoMemVT.getSize();
+ 
+   if (isTruncating)
+     Lo = DAG.getTruncStore(Ch, DL, Lo, Ptr, N->getPointerInfo(), LoMemVT,
+@@ -3285,7 +3285,7 @@ static EVT FindMemType(SelectionDAG& DAG, const TargetLowering &TLI,
+   EVT WidenEltVT = WidenVT.getVectorElementType();
+   unsigned WidenWidth = WidenVT.getSizeInBits();
+   unsigned WidenEltWidth = WidenEltVT.getSizeInBits();
+-  unsigned AlignInBits = Align*8;
++  unsigned AlignInBits = Align*DAG.getDataLayout().getBitsPerByte();
+ 
+   // If we have one element to load/store, return it.
+   EVT RetVT = WidenEltVT;
+@@ -3425,7 +3425,7 @@ SDValue DAGTypeLegalizer::GenWidenVectorLoads(SmallVectorImpl<SDValue> &LdChain,
+   unsigned Offset = 0;
+ 
+   while (LdWidth > 0) {
+-    unsigned Increment = NewVTWidth / 8;
++    unsigned Increment = NewVTWidth / EVT::getBitsPerByte();
+     Offset += Increment;
+     BasePtr = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr,
+                           DAG.getConstant(Increment, dl, BasePtr.getValueType()));
+@@ -3540,7 +3540,7 @@ DAGTypeLegalizer::GenWidenVectorExtLoads(SmallVectorImpl<SDValue> &LdChain,
+   // Load each element and widen.
+   unsigned WidenNumElts = WidenVT.getVectorNumElements();
+   SmallVector<SDValue, 16> Ops(WidenNumElts);
+-  unsigned Increment = LdEltVT.getSizeInBits() / 8;
++  unsigned Increment = LdEltVT.getSize();
+   Ops[0] =
+       DAG.getExtLoad(ExtType, dl, EltVT, Chain, BasePtr, LD->getPointerInfo(),
+                      LdEltVT, Align, MMOFlags, AAInfo);
+@@ -3593,7 +3593,7 @@ void DAGTypeLegalizer::GenWidenVectorStores(SmallVectorImpl<SDValue> &StChain,
+     // Find the largest vector type we can store with.
+     EVT NewVT = FindMemType(DAG, TLI, StWidth, ValVT);
+     unsigned NewVTWidth = NewVT.getSizeInBits();
+-    unsigned Increment = NewVTWidth / 8;
++    unsigned Increment = NewVTWidth / EVT::getBitsPerByte();
+     if (NewVT.isVector()) {
+       unsigned NumVTElts = NewVT.getVectorNumElements();
+       do {
+@@ -3662,7 +3662,7 @@ DAGTypeLegalizer::GenWidenVectorTruncStores(SmallVectorImpl<SDValue> &StChain,
+   // types and bitcast it to the right type. Instead, we unroll the store.
+   EVT StEltVT  = StVT.getVectorElementType();
+   EVT ValEltVT = ValVT.getVectorElementType();
+-  unsigned Increment = ValEltVT.getSizeInBits() / 8;
++  unsigned Increment = ValEltVT.getSizeInBits() / EVT::getBitsPerByte();
+   unsigned NumElts = StVT.getVectorNumElements();
+   SDValue EOp = DAG.getNode(
+       ISD::EXTRACT_VECTOR_ELT, dl, ValEltVT, ValOp,
+diff --git a/lib/CodeGen/SelectionDAG/SelectionDAG.cpp b/lib/CodeGen/SelectionDAG/SelectionDAG.cpp
+index be3eef9..6720b91 100644
+--- a/lib/CodeGen/SelectionDAG/SelectionDAG.cpp
++++ b/lib/CodeGen/SelectionDAG/SelectionDAG.cpp
+@@ -4371,8 +4371,9 @@ static SDValue getMemsetValue(SDValue Value, EVT VT, SelectionDAG &DAG,
+   assert(!Value.isUndef());
+ 
+   unsigned NumBits = VT.getScalarSizeInBits();
++  unsigned BitsPerByte = EVT::getBitsPerByte();
+   if (ConstantSDNode *C = dyn_cast<ConstantSDNode>(Value)) {
+-    assert(C->getAPIntValue().getBitWidth() == 8);
++    assert(C->getAPIntValue().getBitWidth() == BitsPerByte);
+     APInt Val = APInt::getSplat(NumBits, C->getAPIntValue());
+     if (VT.isInteger())
+       return DAG.getConstant(Val, dl, VT);
+@@ -4380,16 +4381,16 @@ static SDValue getMemsetValue(SDValue Value, EVT VT, SelectionDAG &DAG,
+                              VT);
+   }
+ 
+-  assert(Value.getValueType() == MVT::i8 && "memset with non-byte fill value?");
++//  assert(Value.getValueType() == MVT::i8 && "memset with non-byte fill value?");
+   EVT IntVT = VT.getScalarType();
+   if (!IntVT.isInteger())
+     IntVT = EVT::getIntegerVT(*DAG.getContext(), IntVT.getSizeInBits());
+ 
+   Value = DAG.getNode(ISD::ZERO_EXTEND, dl, IntVT, Value);
+-  if (NumBits > 8) {
++  if (NumBits > BitsPerByte) {
+     // Use a multiplication with 0x010101... to extend the input to the
+     // required length.
+-    APInt Magic = APInt::getSplat(NumBits, APInt(8, 0x01));
++    APInt Magic = APInt::getSplat(NumBits, APInt(BitsPerByte, 0x01));
+     Value = DAG.getNode(ISD::MUL, dl, IntVT, Value,
+                         DAG.getConstant(Magic, dl, IntVT));
+   }
+@@ -4426,16 +4427,17 @@ static SDValue getMemsetStringVal(EVT VT, const SDLoc &dl, SelectionDAG &DAG,
+ 
+   assert(!VT.isVector() && "Can't handle vector type here!");
+   unsigned NumVTBits = VT.getSizeInBits();
+-  unsigned NumVTBytes = NumVTBits / 8;
++  unsigned BitsPerByte = EVT::getBitsPerByte();
++  unsigned NumVTBytes = NumVTBits / BitsPerByte;
+   unsigned NumBytes = std::min(NumVTBytes, unsigned(Str.size()));
+ 
+   APInt Val(NumVTBits, 0);
+   if (DAG.getDataLayout().isLittleEndian()) {
+     for (unsigned i = 0; i != NumBytes; ++i)
+-      Val |= (uint64_t)(unsigned char)Str[i] << i*8;
++      Val |= (uint64_t)(unsigned char)Str[i] << i*BitsPerByte;
+   } else {
+     for (unsigned i = 0; i != NumBytes; ++i)
+-      Val |= (uint64_t)(unsigned char)Str[i] << (NumVTBytes-i-1)*8;
++      Val |= (uint64_t)(unsigned char)Str[i] << (NumVTBytes-i-1)*BitsPerByte;
+   }
+ 
+   // If the "cost" of materializing the integer immediate is less than the cost
+@@ -4521,9 +4523,11 @@ static bool FindOptimalMemOpLowering(std::vector<EVT> &MemOps,
+       VT = LVT;
+   }
+ 
++
++  unsigned BitsPerByte = EVT::getBitsPerByte();
+   unsigned NumMemOps = 0;
+   while (Size != 0) {
+-    unsigned VTSize = VT.getSizeInBits() / 8;
++    unsigned VTSize = VT.getSizeInBits() / BitsPerByte;
+     while (VTSize > Size) {
+       // For now, only use non-vector load / store's for the left-over pieces.
+       EVT NewVT = VT;
+@@ -4551,7 +4555,7 @@ static bool FindOptimalMemOpLowering(std::vector<EVT> &MemOps,
+             break;
+         } while (!TLI.isSafeMemOpType(NewVT.getSimpleVT()));
+       }
+-      NewVTSize = NewVT.getSizeInBits() / 8;
++      NewVTSize = NewVT.getSizeInBits() / BitsPerByte;
+ 
+       // If the new VT cannot cover all of the remaining bits, then consider
+       // issuing a (or a pair of) unaligned and overlapping load / store.
+@@ -4559,7 +4563,7 @@ static bool FindOptimalMemOpLowering(std::vector<EVT> &MemOps,
+       // cost model for unaligned load / store.
+       bool Fast;
+       if (NumMemOps && AllowOverlap &&
+-          VTSize >= 8 && NewVTSize < Size &&
++          VTSize >= BitsPerByte && NewVTSize < Size &&
+           TLI.allowsMisalignedMemoryAccesses(VT, DstAS, DstAlign, &Fast) && Fast)
+         VTSize = Size;
+       else {
+@@ -4653,7 +4657,7 @@ static SDValue getMemcpyLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
+   uint64_t SrcOff = 0, DstOff = 0;
+   for (unsigned i = 0; i != NumMemOps; ++i) {
+     EVT VT = MemOps[i];
+-    unsigned VTSize = VT.getSizeInBits() / 8;
++    unsigned VTSize = VT.getSize();
+     SDValue Value, Store;
+ 
+     if (VTSize > Size) {
+@@ -4758,7 +4762,7 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
+   unsigned NumMemOps = MemOps.size();
+   for (unsigned i = 0; i < NumMemOps; i++) {
+     EVT VT = MemOps[i];
+-    unsigned VTSize = VT.getSizeInBits() / 8;
++    unsigned VTSize = VT.getSize();
+     SDValue Value;
+ 
+     Value =
+@@ -4772,7 +4776,7 @@ static SDValue getMemmoveLoadsAndStores(SelectionDAG &DAG, const SDLoc &dl,
+   OutChains.clear();
+   for (unsigned i = 0; i < NumMemOps; i++) {
+     EVT VT = MemOps[i];
+-    unsigned VTSize = VT.getSizeInBits() / 8;
++    unsigned VTSize = VT.getSize();
+     SDValue Store;
+ 
+     Store = DAG.getStore(Chain, dl, LoadValues[i],
+@@ -4879,7 +4883,7 @@ static SDValue getMemsetStores(SelectionDAG &DAG, const SDLoc &dl,
+         DstPtrInfo.getWithOffset(DstOff), Align,
+         isVol ? MachineMemOperand::MOVolatile : MachineMemOperand::MONone);
+     OutChains.push_back(Store);
+-    DstOff += VT.getSizeInBits() / 8;
++    DstOff += VT.getSize();
+     Size -= VTSize;
+   }
+ 
+@@ -7213,7 +7217,7 @@ bool SelectionDAG::areNonVolatileConsecutiveLoads(LoadSDNode *LD,
+   if (LD->getChain() != Base->getChain())
+     return false;
+   EVT VT = LD->getValueType(0);
+-  if (VT.getSizeInBits() / 8 != Bytes)
++  if (VT.getSize() != Bytes)
+     return false;
+ 
+   SDValue Loc = LD->getOperand(1);
+@@ -7405,7 +7409,7 @@ bool BuildVectorSDNode::isConstantSplat(APInt &SplatValue,
+   // size that splats the vector.
+ 
+   HasAnyUndefs = (SplatUndef != 0);
+-  while (sz > 8) {
++  while (sz > EVT::getBitsPerByte()) {
+ 
+     unsigned HalfSize = sz / 2;
+     APInt HighValue = SplatValue.lshr(HalfSize).trunc(HalfSize);
+diff --git a/lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp b/lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp
+index c1eef4d..84d5483 100644
+--- a/lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp
++++ b/lib/CodeGen/SelectionDAG/SelectionDAGBuilder.cpp
+@@ -8105,7 +8105,7 @@ void SelectionDAGISel::LowerArguments(const Function &F) {
+       unsigned NumRegs = TLI->getNumRegisters(*CurDAG->getContext(), VT);
+       for (unsigned i = 0; i != NumRegs; ++i) {
+         ISD::InputArg MyFlags(Flags, RegisterVT, VT, isArgValueUsed,
+-                              Idx-1, PartBase+i*RegisterVT.getStoreSize());
++                              Idx-1, PartBase+i*RegisterVT.getStoreSize(EVT::getBitsPerByte()));
+         if (NumRegs > 1 && i == 0)
+           MyFlags.Flags.setSplit();
+         // if it isn't first piece, alignment must be 1
+diff --git a/lib/CodeGen/SelectionDAG/TargetLowering.cpp b/lib/CodeGen/SelectionDAG/TargetLowering.cpp
+index 690f0d2..8244cc7 100644
+--- a/lib/CodeGen/SelectionDAG/TargetLowering.cpp
++++ b/lib/CodeGen/SelectionDAG/TargetLowering.cpp
+@@ -3464,8 +3464,8 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
+     // Copy the value to a (aligned) stack slot using (unaligned) integer
+     // loads and stores, then do a (aligned) load from the stack slot.
+     MVT RegVT = getRegisterType(*DAG.getContext(), intVT);
+-    unsigned LoadedBytes = LoadedVT.getSizeInBits() / 8;
+-    unsigned RegBytes = RegVT.getSizeInBits() / 8;
++    unsigned LoadedBytes = LoadedVT.getSize();
++    unsigned RegBytes = RegVT.getSize(EVT::getBitsPerByte());
+     unsigned NumRegs = (LoadedBytes + RegBytes - 1) / RegBytes;
+ 
+     // Make sure the stack slot is also aligned for the register type.
+@@ -3500,7 +3500,8 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
+ 
+     // The last copy may be partial.  Do an extending load.
+     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(),
+-                                  8 * (LoadedBytes - Offset));
++                                  EVT::getBitsPerByte() *
++                                  (LoadedBytes - Offset));
+     SDValue Load =
+         DAG.getExtLoad(ISD::EXTLOAD, dl, RegVT, Chain, Ptr,
+                        LD->getPointerInfo().getWithOffset(Offset), MemVT,
+@@ -3534,7 +3535,7 @@ TargetLowering::expandUnalignedLoad(LoadSDNode *LD, SelectionDAG &DAG) const {
+   NumBits >>= 1;
+ 
+   unsigned Alignment = LD->getAlignment();
+-  unsigned IncrementSize = NumBits / 8;
++  unsigned IncrementSize = NumBits / EVT::getBitsPerByte();
+   ISD::LoadExtType HiExtType = LD->getExtensionType();
+ 
+   // If the original load is NON_EXTLOAD, the hi part load must be ZEXTLOAD.
+@@ -3615,8 +3616,8 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
+                       EVT::getIntegerVT(*DAG.getContext(),
+                                         StoredVT.getSizeInBits()));
+     EVT PtrVT = Ptr.getValueType();
+-    unsigned StoredBytes = StoredVT.getSizeInBits() / 8;
+-    unsigned RegBytes = RegVT.getSizeInBits() / 8;
++    unsigned StoredBytes = StoredVT.getSize();
++    unsigned RegBytes = RegVT.getSize(EVT::getBitsPerByte());
+     unsigned NumRegs = (StoredBytes + RegBytes - 1) / RegBytes;
+ 
+     // Make sure the stack slot is also aligned for the register type.
+@@ -3654,7 +3655,8 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
+     // machines this requires an extending load from the stack slot to ensure
+     // that the bits are in the right place.
+     EVT MemVT = EVT::getIntegerVT(*DAG.getContext(),
+-                                  8 * (StoredBytes - Offset));
++                                  EVT::getBitsPerByte() *
++                                  (StoredBytes - Offset));
+ 
+     // Load from the stack slot.
+     SDValue Load = DAG.getExtLoad(ISD::EXTLOAD, dl, RegVT, Store, StackPtr,
+@@ -3676,7 +3678,7 @@ SDValue TargetLowering::expandUnalignedStore(StoreSDNode *ST,
+   // Get the half-size VT
+   EVT NewStoredVT = ST->getMemoryVT().getHalfSizedIntegerVT(*DAG.getContext());
+   int NumBits = NewStoredVT.getSizeInBits();
+-  int IncrementSize = NumBits / 8;
++  int IncrementSize = NumBits / EVT::getBitsPerByte();
+ 
+   // Divide the stored value in two parts.
+   SDValue ShiftAmount =
+@@ -3768,8 +3770,8 @@ SDValue TargetLowering::getVectorElementPointer(SelectionDAG &DAG,
+   EVT EltVT = VecVT.getVectorElementType();
+ 
+   // Calculate the element offset and add it to the pointer.
+-  unsigned EltSize = EltVT.getSizeInBits() / 8; // FIXME: should be ABI size.
+-  assert(EltSize * 8 == EltVT.getSizeInBits() &&
++  unsigned EltSize = EltVT.getSize(); // FIXME: should be ABI size.
++  assert(EltSize * EVT::getBitsPerByte() == EltVT.getSizeInBits() &&
+          "Converting bits to bytes lost precision");
+ 
+   Index = clampDynamicVectorIndex(DAG, Index, VecVT, dl);
+diff --git a/lib/CodeGen/TargetLoweringBase.cpp b/lib/CodeGen/TargetLoweringBase.cpp
+index f18cdca..b17bfee 100644
+--- a/lib/CodeGen/TargetLoweringBase.cpp
++++ b/lib/CodeGen/TargetLoweringBase.cpp
+@@ -972,7 +972,7 @@ void TargetLoweringBase::initActions() {
+ 
+ MVT TargetLoweringBase::getScalarShiftAmountTy(const DataLayout &DL,
+                                                EVT) const {
+-  return MVT::getIntegerVT(8 * DL.getPointerSize(0));
++  return MVT::getIntegerVT(DL.getBitsPerByte() * DL.getPointerSize(0));
+ }
+ 
+ EVT TargetLoweringBase::getShiftAmountTy(EVT LHSTy,
+diff --git a/lib/IR/DataLayout.cpp b/lib/IR/DataLayout.cpp
+index c2719a1..bcabba6 100644
+--- a/lib/IR/DataLayout.cpp
++++ b/lib/IR/DataLayout.cpp
+@@ -29,6 +29,7 @@
+ #include "llvm/Support/MathExtras.h"
+ #include "llvm/Support/Mutex.h"
+ #include "llvm/Support/raw_ostream.h"
++#include "llvm/CodeGen/ValueTypes.h"
+ #include <algorithm>
+ #include <cstdlib>
+ using namespace llvm;
+@@ -358,6 +359,7 @@ void DataLayout::parseSpecifier(StringRef Desc) {
+       // the byte size. That is, p, i, v, f, a, s, and n. Otherwise, the default
+       // value of 8 bits will be used for the calculating the alignment numbers.
+       BitsPerByte = getInt(Tok);
++      EVT::setBitsPerByte(BitsPerByte);
+       break;
+     }
+     case 'm':
+diff --git a/lib/IR/IRBuilder.cpp b/lib/IR/IRBuilder.cpp
+index d3e410d..b9287c6 100644
+--- a/lib/IR/IRBuilder.cpp
++++ b/lib/IR/IRBuilder.cpp
+@@ -56,6 +56,19 @@ Value *IRBuilderBase::getCastedInt8PtrValue(Value *Ptr) {
+   return BCI;
+ }
+ 
++Value *IRBuilderBase::getCastedIntByteSizePtrValue(Value *Ptr) {
++  PointerType *PT = cast<PointerType>(Ptr->getType());
++  if (PT->getElementType()->isIntegerTy(EVT::getBitsPerByte()))
++    return Ptr;
++
++  // Otherwise, we need to insert a bitcast.
++  PT = getIntByteSizePtrTy(PT->getAddressSpace());
++  BitCastInst *BCI = new BitCastInst(Ptr, PT, "");
++  BB->getInstList().insert(InsertPt, BCI);
++  SetInstDebugLocation(BCI);
++  return BCI;
++}
++
+ static CallInst *createCallHelper(Value *Callee, ArrayRef<Value *> Ops,
+                                   IRBuilderBase *Builder,
+                                   const Twine& Name="") {
+@@ -82,7 +95,7 @@ CallInst *IRBuilderBase::
+ CreateMemSet(Value *Ptr, Value *Val, Value *Size, unsigned Align,
+              bool isVolatile, MDNode *TBAATag, MDNode *ScopeTag,
+              MDNode *NoAliasTag) {
+-  Ptr = getCastedInt8PtrValue(Ptr);
++  Ptr = getCastedIntByteSizePtrValue(Ptr);
+   Value *Ops[] = { Ptr, Val, Size, getInt32(Align), getInt1(isVolatile) };
+   Type *Tys[] = { Ptr->getType(), Size->getType() };
+   Module *M = BB->getParent()->getParent();
+@@ -107,8 +120,8 @@ CallInst *IRBuilderBase::
+ CreateMemCpy(Value *Dst, Value *Src, Value *Size, unsigned Align,
+              bool isVolatile, MDNode *TBAATag, MDNode *TBAAStructTag,
+              MDNode *ScopeTag, MDNode *NoAliasTag) {
+-  Dst = getCastedInt8PtrValue(Dst);
+-  Src = getCastedInt8PtrValue(Src);
++  Dst = getCastedIntByteSizePtrValue(Dst);
++  Src = getCastedIntByteSizePtrValue(Src);
+ 
+   Value *Ops[] = { Dst, Src, Size, getInt32(Align), getInt1(isVolatile) };
+   Type *Tys[] = { Dst->getType(), Src->getType(), Size->getType() };
+@@ -138,8 +151,8 @@ CallInst *IRBuilderBase::
+ CreateMemMove(Value *Dst, Value *Src, Value *Size, unsigned Align,
+               bool isVolatile, MDNode *TBAATag, MDNode *ScopeTag,
+               MDNode *NoAliasTag) {
+-  Dst = getCastedInt8PtrValue(Dst);
+-  Src = getCastedInt8PtrValue(Src);
++  Dst = getCastedIntByteSizePtrValue(Dst);
++  Src = getCastedIntByteSizePtrValue(Src);
+   
+   Value *Ops[] = { Dst, Src, Size, getInt32(Align), getInt1(isVolatile) };
+   Type *Tys[] = { Dst->getType(), Src->getType(), Size->getType() };
+diff --git a/lib/IR/ValueTypes.cpp b/lib/IR/ValueTypes.cpp
+index 2132e16..02c5e78 100644
+--- a/lib/IR/ValueTypes.cpp
++++ b/lib/IR/ValueTypes.cpp
+@@ -19,6 +19,8 @@
+ #include "llvm/Support/ErrorHandling.h"
+ using namespace llvm;
+ 
++unsigned EVT::BitsPerByte = 8;
++
+ EVT EVT::changeExtendedTypeToInteger() const {
+   LLVMContext &Context = LLVMTy->getContext();
+   return getIntegerVT(Context, getSizeInBits());
+diff --git a/lib/Target/AMDGPU/SIISelLowering.cpp b/lib/Target/AMDGPU/SIISelLowering.cpp
+index e314345..327b222 100644
+--- a/lib/Target/AMDGPU/SIISelLowering.cpp
++++ b/lib/Target/AMDGPU/SIISelLowering.cpp
+@@ -808,7 +808,7 @@ SDValue SITargetLowering::LowerFormalArguments(
+ 
+         for (unsigned j = 0; j != NumElements; ++j) {
+           Splits.push_back(NewArg);
+-          NewArg.PartOffset += NewArg.VT.getStoreSize();
++        NewArg.PartOffset += NewArg.VT.getStoreSize(8);
+         }
+       } else {
+         Splits.push_back(Arg);
+diff --git a/lib/Target/Hexagon/HexagonISelLowering.cpp b/lib/Target/Hexagon/HexagonISelLowering.cpp
+index e87e1e6..dd90044 100644
+--- a/lib/Target/Hexagon/HexagonISelLowering.cpp
++++ b/lib/Target/Hexagon/HexagonISelLowering.cpp
+@@ -1199,7 +1199,7 @@ SDValue HexagonTargetLowering::LowerFormalArguments(
+         // "real" size, not the size of the pointer.
+         ObjSize = Flags.getByValSize();
+       } else {
+-        ObjSize = VA.getLocVT().getStoreSizeInBits() >> 3;
++        ObjSize = VA.getLocVT().getStoreSize(8);
+       }
+ 
+       StackLocation = HEXAGON_LRFP_SIZE + VA.getLocMemOffset();
+diff --git a/lib/Target/PowerPC/PPCISelLowering.cpp b/lib/Target/PowerPC/PPCISelLowering.cpp
+index 53e7dd1..f97c18d 100644
+--- a/lib/Target/PowerPC/PPCISelLowering.cpp
++++ b/lib/Target/PowerPC/PPCISelLowering.cpp
+@@ -9081,9 +9081,9 @@ PPCTargetLowering::emitEHSjLjSetJmp(MachineInstr &MI,
+   // identifier (R13) is not affected.
+ 
+   // thisMBB:
+-  const int64_t LabelOffset = 1 * PVT.getStoreSize();
+-  const int64_t TOCOffset   = 3 * PVT.getStoreSize();
+-  const int64_t BPOffset    = 4 * PVT.getStoreSize();
++  const int64_t LabelOffset = 1 * PVT.getStoreSize(8);
++  const int64_t TOCOffset   = 3 * PVT.getStoreSize(8);
++  const int64_t BPOffset    = 4 * PVT.getStoreSize(8);
+ 
+   // Prepare IP either in reg.
+   const TargetRegisterClass *PtrRC = getRegClassFor(PVT);
+@@ -9193,10 +9193,10 @@ PPCTargetLowering::emitEHSjLjLongJmp(MachineInstr &MI,
+ 
+   MachineInstrBuilder MIB;
+ 
+-  const int64_t LabelOffset = 1 * PVT.getStoreSize();
+-  const int64_t SPOffset    = 2 * PVT.getStoreSize();
+-  const int64_t TOCOffset   = 3 * PVT.getStoreSize();
+-  const int64_t BPOffset    = 4 * PVT.getStoreSize();
++  const int64_t LabelOffset = 1 * PVT.getStoreSize(8);
++  const int64_t SPOffset    = 2 * PVT.getStoreSize(8);
++  const int64_t TOCOffset   = 3 * PVT.getStoreSize(8);
++  const int64_t BPOffset    = 4 * PVT.getStoreSize(8);
+ 
+   unsigned BufReg = MI.getOperand(0).getReg();
+ 
+diff --git a/lib/Target/PowerPC/PPCTargetTransformInfo.cpp b/lib/Target/PowerPC/PPCTargetTransformInfo.cpp
+index f94d1ea..6946540 100644
+--- a/lib/Target/PowerPC/PPCTargetTransformInfo.cpp
++++ b/lib/Target/PowerPC/PPCTargetTransformInfo.cpp
+@@ -378,7 +378,7 @@ int PPCTTIImpl::getMemoryOpCost(unsigned Opcode, Type *Src, unsigned Alignment,
+     return 1;
+ 
+   // Aligned loads and stores are easy.
+-  unsigned SrcBytes = LT.second.getStoreSize();
++  unsigned SrcBytes = LT.second.getStoreSize(8);
+   if (!SrcBytes || !Alignment || Alignment >= SrcBytes)
+     return Cost;
+ 
+diff --git a/lib/Target/X86/X86ISelLowering.cpp b/lib/Target/X86/X86ISelLowering.cpp
+index b686c42..dfe9692 100644
+--- a/lib/Target/X86/X86ISelLowering.cpp
++++ b/lib/Target/X86/X86ISelLowering.cpp
+@@ -25519,7 +25519,7 @@ X86TargetLowering::emitEHSjLjSetJmp(MachineInstr &MI,
+   // thisMBB:
+   unsigned PtrStoreOpc = 0;
+   unsigned LabelReg = 0;
+-  const int64_t LabelOffset = 1 * PVT.getStoreSize();
++  const int64_t LabelOffset = 1 * PVT.getStoreSize(8);
+   bool UseImmLabel = (MF->getTarget().getCodeModel() == CodeModel::Small) &&
+                      !isPositionIndependent();
+ 
+@@ -25626,8 +25626,8 @@ X86TargetLowering::emitEHSjLjLongJmp(MachineInstr &MI,
+ 
+   MachineInstrBuilder MIB;
+ 
+-  const int64_t LabelOffset = 1 * PVT.getStoreSize();
+-  const int64_t SPOffset = 2 * PVT.getStoreSize();
++  const int64_t LabelOffset = 1 * PVT.getStoreSize(8);
++  const int64_t SPOffset = 2 * PVT.getStoreSize(8);
+ 
+   unsigned PtrLoadOpc = (PVT == MVT::i64) ? X86::MOV64rm : X86::MOV32rm;
+   unsigned IJmpOpc = (PVT == MVT::i64) ? X86::JMP64r : X86::JMP32r;
+diff --git a/lib/Transforms/InstCombine/InstCombineCalls.cpp b/lib/Transforms/InstCombine/InstCombineCalls.cpp
+index b0a0327..efb20cf 100644
+--- a/lib/Transforms/InstCombine/InstCombineCalls.cpp
++++ b/lib/Transforms/InstCombine/InstCombineCalls.cpp
+@@ -131,7 +131,8 @@ Instruction *InstCombiner::SimplifyMemTransfer(MemIntrinsic *MI) {
+   uint64_t Size = MemOpLength->getLimitedValue();
+   assert(Size && "0-sized memory transferring should be removed already.");
+ 
+-  if (Size > 8 || (Size&(Size-1)))
++  unsigned BitsPerByte = DL.getBitsPerByte();
++  if (Size*BitsPerByte > 64 || (Size&(Size-1)))
+     return nullptr;  // If not 1/2/4/8 bytes, exit.
+ 
+   // Use an integer load+store unless we can find something better.
+@@ -140,7 +141,8 @@ Instruction *InstCombiner::SimplifyMemTransfer(MemIntrinsic *MI) {
+   unsigned DstAddrSp =
+     cast<PointerType>(MI->getArgOperand(0)->getType())->getAddressSpace();
+ 
+-  IntegerType* IntType = IntegerType::get(MI->getContext(), Size<<3);
++  IntegerType* IntType =
++    IntegerType::get(MI->getContext(), Size * BitsPerByte);
+   Type *NewSrcPtrTy = PointerType::get(IntType, SrcAddrSp);
+   Type *NewDstPtrTy = PointerType::get(IntType, DstAddrSp);
+ 
+diff --git a/lib/Transforms/Scalar/GVN.cpp b/lib/Transforms/Scalar/GVN.cpp
+index 0137378..572406a 100644
+--- a/lib/Transforms/Scalar/GVN.cpp
++++ b/lib/Transforms/Scalar/GVN.cpp
+@@ -842,11 +842,12 @@ static int AnalyzeLoadFromClobberingWrite(Type *LoadTy, Value *LoadPtr,
+   // anything to the load.  In this case, they really don't alias at all, AA
+   // must have gotten confused.
+   uint64_t LoadSize = DL.getTypeSizeInBits(LoadTy);
++  unsigned BitsPerByte = DL.getBitsPerByte();
+ 
+-  if ((WriteSizeInBits & 7) | (LoadSize & 7))
++  if ((WriteSizeInBits & (BitsPerByte-1)) | (LoadSize & (BitsPerByte-1)))
+     return -1;
+-  uint64_t StoreSize = WriteSizeInBits / 8;  // Convert to bytes.
+-  LoadSize /= 8;
++  uint64_t StoreSize = WriteSizeInBits / BitsPerByte;  // Convert to bytes.
++  LoadSize /= BitsPerByte;
+ 
+ 
+   bool isAAFailure = false;
+@@ -917,7 +918,8 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+   assert(DepLI->isSimple() && "Cannot widen volatile/atomic load!");
+   assert(DepLI->getType()->isIntegerTy() && "Can't widen non-integer load");
+ 
+-  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr, Size*8, DL);
++  return AnalyzeLoadFromClobberingWrite(LoadTy, LoadPtr, DepPtr,
++                                        Size*DL.getBitsPerByte(), DL);
+ }
+ 
+ 
+@@ -925,10 +927,12 @@ static int AnalyzeLoadFromClobberingLoad(Type *LoadTy, Value *LoadPtr,
+ static int AnalyzeLoadFromClobberingMemInst(Type *LoadTy, Value *LoadPtr,
+                                             MemIntrinsic *MI,
+                                             const DataLayout &DL) {
++  unsigned BitsPerByte = DL.getBitsPerByte();
++
+   // If the mem operation is a non-constant size, we can't handle it.
+   ConstantInt *SizeCst = dyn_cast<ConstantInt>(MI->getLength());
+   if (!SizeCst) return -1;
+-  uint64_t MemSizeInBits = SizeCst->getZExtValue()*8;
++  uint64_t MemSizeInBits = SizeCst->getZExtValue()*BitsPerByte;
+ 
+   // If this is memset, we just need to see if the offset is valid in the size
+   // of the memset..
+@@ -978,9 +982,12 @@ static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
+                                    Type *LoadTy,
+                                    Instruction *InsertPt, const DataLayout &DL){
+   LLVMContext &Ctx = SrcVal->getType()->getContext();
++  unsigned BitsPerByte = DL.getBitsPerByte();
+ 
+-  uint64_t StoreSize = (DL.getTypeSizeInBits(SrcVal->getType()) + 7) / 8;
+-  uint64_t LoadSize = (DL.getTypeSizeInBits(LoadTy) + 7) / 8;
++  uint64_t StoreSize = 
++    (DL.getTypeSizeInBits(SrcVal->getType()) + (BitsPerByte-1)) / BitsPerByte;
++  uint64_t LoadSize = 
++    (DL.getTypeSizeInBits(LoadTy) + (BitsPerByte-1)) / BitsPerByte;
+ 
+   IRBuilder<> Builder(InsertPt);
+ 
+@@ -990,20 +997,22 @@ static Value *GetStoreValueForLoad(Value *SrcVal, unsigned Offset,
+     SrcVal = Builder.CreatePtrToInt(SrcVal,
+         DL.getIntPtrType(SrcVal->getType()));
+   if (!SrcVal->getType()->isIntegerTy())
+-    SrcVal = Builder.CreateBitCast(SrcVal, IntegerType::get(Ctx, StoreSize*8));
++    SrcVal = Builder.CreateBitCast(SrcVal, 
++                                   IntegerType::get(Ctx, StoreSize*BitsPerByte));
+ 
+   // Shift the bits to the least significant depending on endianness.
+   unsigned ShiftAmt;
+   if (DL.isLittleEndian())
+-    ShiftAmt = Offset*8;
++    ShiftAmt = Offset*BitsPerByte;
+   else
+-    ShiftAmt = (StoreSize-LoadSize-Offset)*8;
++    ShiftAmt = (StoreSize-LoadSize-Offset)*BitsPerByte;
+ 
+   if (ShiftAmt)
+     SrcVal = Builder.CreateLShr(SrcVal, ShiftAmt);
+ 
+   if (LoadSize != StoreSize)
+-    SrcVal = Builder.CreateTrunc(SrcVal, IntegerType::get(Ctx, LoadSize*8));
++    SrcVal = Builder.CreateTrunc(SrcVal,
++                                 IntegerType::get(Ctx, LoadSize*BitsPerByte));
+ 
+   return CoerceAvailableValueToLoadType(SrcVal, LoadTy, Builder, DL);
+ }
+@@ -1031,13 +1040,14 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
+       NewLoadSize = NextPowerOf2(NewLoadSize);
+ 
+     Value *PtrVal = SrcVal->getPointerOperand();
++    unsigned BitsPerByte = DL.getBitsPerByte();
+ 
+     // Insert the new load after the old load.  This ensures that subsequent
+     // memdep queries will find the new load.  We can't easily remove the old
+     // load completely because it is already in the value numbering table.
+     IRBuilder<> Builder(SrcVal->getParent(), ++BasicBlock::iterator(SrcVal));
+     Type *DestPTy =
+-      IntegerType::get(LoadTy->getContext(), NewLoadSize*8);
++      IntegerType::get(LoadTy->getContext(), NewLoadSize*BitsPerByte);
+     DestPTy = PointerType::get(DestPTy,
+                                PtrVal->getType()->getPointerAddressSpace());
+     Builder.SetCurrentDebugLocation(SrcVal->getDebugLoc());
+@@ -1053,7 +1063,7 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
+     // system, we need to shift down to get the relevant bits.
+     Value *RV = NewLoad;
+     if (DL.isBigEndian())
+-      RV = Builder.CreateLShr(RV, (NewLoadSize - SrcValStoreSize) * 8);
++      RV = Builder.CreateLShr(RV, (NewLoadSize - SrcValStoreSize) * BitsPerByte);
+     RV = Builder.CreateTrunc(RV, SrcVal->getType());
+     SrcVal->replaceAllUsesWith(RV);
+ 
+@@ -1075,8 +1085,9 @@ static Value *GetLoadValueForLoad(LoadInst *SrcVal, unsigned Offset,
+ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
+                                      Type *LoadTy, Instruction *InsertPt,
+                                      const DataLayout &DL){
++  unsigned BitsPerByte = DL.getBitsPerByte();
+   LLVMContext &Ctx = LoadTy->getContext();
+-  uint64_t LoadSize = DL.getTypeSizeInBits(LoadTy)/8;
++  uint64_t LoadSize = DL.getTypeSizeInBits(LoadTy)/BitsPerByte;
+ 
+   IRBuilder<> Builder(InsertPt);
+ 
+@@ -1087,22 +1098,22 @@ static Value *GetMemInstValueForLoad(MemIntrinsic *SrcInst, unsigned Offset,
+     // independently of what the offset is.
+     Value *Val = MSI->getValue();
+     if (LoadSize != 1)
+-      Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize*8));
+-
++      Val = Builder.CreateZExt(Val, IntegerType::get(Ctx, LoadSize*
++                                                     BitsPerByte));
+     Value *OneElt = Val;
+ 
+     // Splat the value out to the right number of bits.
+     for (unsigned NumBytesSet = 1; NumBytesSet != LoadSize; ) {
+       // If we can double the number of bytes set, do it.
+       if (NumBytesSet*2 <= LoadSize) {
+-        Value *ShVal = Builder.CreateShl(Val, NumBytesSet*8);
++        Value *ShVal = Builder.CreateShl(Val, NumBytesSet*BitsPerByte);
+         Val = Builder.CreateOr(Val, ShVal);
+         NumBytesSet <<= 1;
+         continue;
+       }
+ 
+       // Otherwise insert one byte at a time.
+-      Value *ShVal = Builder.CreateShl(Val, 1*8);
++      Value *ShVal = Builder.CreateShl(Val, 1*BitsPerByte);
+       Val = Builder.CreateOr(OneElt, ShVal);
+       ++NumBytesSet;
+     }
+diff --git a/lib/Transforms/Scalar/SROA.cpp b/lib/Transforms/Scalar/SROA.cpp
+index 9b54679..1c73ead 100644
+--- a/lib/Transforms/Scalar/SROA.cpp
++++ b/lib/Transforms/Scalar/SROA.cpp
+@@ -1391,11 +1391,12 @@ static Value *getNaturalGEPRecursively(IRBuilderTy &IRB, const DataLayout &DL,
+   // over a vector from the IR completely.
+   if (VectorType *VecTy = dyn_cast<VectorType>(Ty)) {
+     unsigned ElementSizeInBits = DL.getTypeSizeInBits(VecTy->getScalarType());
+-    if (ElementSizeInBits % 8 != 0) {
++    unsigned BitsPerByte = DL.getBitsPerByte();
++    if (ElementSizeInBits % BitsPerByte != 0) {
+       // GEPs over non-multiple of 8 size vector elements are invalid.
+       return nullptr;
+     }
+-    APInt ElementSize(Offset.getBitWidth(), ElementSizeInBits / 8);
++    APInt ElementSize(Offset.getBitWidth(), ElementSizeInBits / BitsPerByte);
+     APInt NumSkippedElements = Offset.sdiv(ElementSize);
+     if (NumSkippedElements.ugt(VecTy->getNumElements()))
+       return nullptr;
+@@ -1455,7 +1456,8 @@ static Value *getNaturalGEPWithOffset(IRBuilderTy &IRB, const DataLayout &DL,
+ 
+   // Don't consider any GEPs through an i8* as natural unless the TargetTy is
+   // an i8.
+-  if (Ty == IRB.getInt8PtrTy(Ty->getAddressSpace()) && TargetTy->isIntegerTy(8))
++  unsigned BitsPerByte = DL.getBitsPerByte();
++  if (Ty == IRB.getInt8PtrTy(Ty->getAddressSpace()) && TargetTy->isIntegerTy(BitsPerByte))
+     return nullptr;
+ 
+   Type *ElementTy = Ty->getElementType();
+@@ -1478,7 +1480,7 @@ static Value *getNaturalGEPWithOffset(IRBuilderTy &IRB, const DataLayout &DL,
+ /// This tries very hard to compute a "natural" GEP which arrives at the offset
+ /// and produces the pointer type desired. Where it cannot, it will try to use
+ /// the natural GEP to arrive at the offset and bitcast to the type. Where that
+-/// fails, it will try to use an existing i8* and GEP to the byte offset and
++/// fails, it will try to use an existing byte pointer and GEP to the byte offset and
+ /// bitcast to the type.
+ ///
+ /// The strategy for finding the more natural GEPs is to peel off layers of the
+@@ -1501,10 +1503,10 @@ static Value *getAdjustedPtr(IRBuilderTy &IRB, const DataLayout &DL, Value *Ptr,
+   Value *OffsetPtr = nullptr;
+   Value *OffsetBasePtr;
+ 
+-  // Remember any i8 pointer we come across to re-use if we need to do a raw
++  // Remember any byte pointer we come across to re-use if we need to do a raw
+   // byte offset.
+-  Value *Int8Ptr = nullptr;
+-  APInt Int8PtrOffset(Offset.getBitWidth(), 0);
++  Value *IntBytePtr = nullptr;
++  APInt IntBytePtrOffset(Offset.getBitWidth(), 0);
+ 
+   Type *TargetTy = PointerTy->getPointerElementType();
+ 
+@@ -1539,10 +1541,10 @@ static Value *getAdjustedPtr(IRBuilderTy &IRB, const DataLayout &DL, Value *Ptr,
+         return P;
+     }
+ 
+-    // Stash this pointer if we've found an i8*.
+-    if (Ptr->getType()->isIntegerTy(8)) {
+-      Int8Ptr = Ptr;
+-      Int8PtrOffset = Offset;
++    // Stash this pointer if we've found a byte pointer.
++    if (Ptr->getType()->isIntegerTy(DL.getBitsPerByte())) {
++      IntBytePtr = Ptr;
++      IntBytePtrOffset = Offset;
+     }
+ 
+     // Peel off a layer of the pointer and update the offset appropriately.
+@@ -1559,22 +1561,22 @@ static Value *getAdjustedPtr(IRBuilderTy &IRB, const DataLayout &DL, Value *Ptr,
+   } while (Visited.insert(Ptr).second);
+ 
+   if (!OffsetPtr) {
+-    if (!Int8Ptr) {
+-      Int8Ptr = IRB.CreateBitCast(
+-          Ptr, IRB.getInt8PtrTy(PointerTy->getPointerAddressSpace()),
++    if (!IntBytePtr) {
++      IntBytePtr = IRB.CreateBitCast(
++          Ptr, IRB.getIntByteSizePtrTy(PointerTy->getPointerAddressSpace()),
+           NamePrefix + "sroa_raw_cast");
+-      Int8PtrOffset = Offset;
++      IntBytePtrOffset = Offset;
+     }
+ 
+-    OffsetPtr = Int8PtrOffset == 0
+-                    ? Int8Ptr
+-                    : IRB.CreateInBoundsGEP(IRB.getInt8Ty(), Int8Ptr,
+-                                            IRB.getInt(Int8PtrOffset),
++    OffsetPtr = IntBytePtrOffset == 0
++    ? IntBytePtr
++    : IRB.CreateInBoundsGEP(IRB.getIntNTy(DL.getBitsPerByte()),
++                            IntBytePtr, IRB.getInt(IntBytePtrOffset),
+                                             NamePrefix + "sroa_raw_idx");
+   }
+   Ptr = OffsetPtr;
+ 
+-  // On the off chance we were targeting i8*, guard the bitcast here.
++  // On the off chance we were targeting a byte pointer, guard the bitcast here.
+   if (Ptr->getType() != PointerTy)
+     Ptr = IRB.CreateBitCast(Ptr, PointerTy, NamePrefix + "sroa_cast");
+ 
+@@ -2014,9 +2016,10 @@ static Value *extractInteger(const DataLayout &DL, IRBuilderTy &IRB, Value *V,
+   IntegerType *IntTy = cast<IntegerType>(V->getType());
+   assert(DL.getTypeStoreSize(Ty) + Offset <= DL.getTypeStoreSize(IntTy) &&
+          "Element extends past full value");
+-  uint64_t ShAmt = 8 * Offset;
++  unsigned BitsPerByte = DL.getBitsPerByte();
++  uint64_t ShAmt = BitsPerByte*Offset;
+   if (DL.isBigEndian())
+-    ShAmt = 8 * (DL.getTypeStoreSize(IntTy) - DL.getTypeStoreSize(Ty) - Offset);
++    ShAmt = BitsPerByte * (DL.getTypeStoreSize(IntTy) - DL.getTypeStoreSize(Ty) - Offset);
+   if (ShAmt) {
+     V = IRB.CreateLShr(V, ShAmt, Name + ".shift");
+     DEBUG(dbgs() << "     shifted: " << *V << "\n");
+@@ -2043,9 +2046,10 @@ static Value *insertInteger(const DataLayout &DL, IRBuilderTy &IRB, Value *Old,
+   }
+   assert(DL.getTypeStoreSize(Ty) + Offset <= DL.getTypeStoreSize(IntTy) &&
+          "Element store outside of alloca store");
+-  uint64_t ShAmt = 8 * Offset;
++  unsigned BitsPerByte = DL.getBitsPerByte();
++  uint64_t ShAmt = BitsPerByte*Offset;
+   if (DL.isBigEndian())
+-    ShAmt = 8 * (DL.getTypeStoreSize(IntTy) - DL.getTypeStoreSize(Ty) - Offset);
++    ShAmt = BitsPerByte * (DL.getTypeStoreSize(IntTy) - DL.getTypeStoreSize(Ty) - Offset);
+   if (ShAmt) {
+     V = IRB.CreateShl(V, ShAmt, Name + ".shift");
+     DEBUG(dbgs() << "     shifted: " << *V << "\n");
+@@ -2217,8 +2221,9 @@ public:
+         OldPtr(), PHIUsers(PHIUsers), SelectUsers(SelectUsers),
+         IRB(NewAI.getContext(), ConstantFolder()) {
+     if (VecTy) {
+-      assert((DL.getTypeSizeInBits(ElementTy) % 8) == 0 &&
+-             "Only multiple-of-8 sized vector elements are viable");
++      unsigned BitsPerByte = DL.getBitsPerByte();
++      assert((DL.getTypeSizeInBits(ElementTy) % BitsPerByte) == 0 &&
++             "Only multiple-of-byte sized vector elements are viable");
+       ++NumVectorized;
+     }
+     assert((!IntTy && !VecTy) || (IntTy && !VecTy) || (!IntTy && VecTy));
+@@ -2349,8 +2354,9 @@ private:
+     V = convertValue(DL, IRB, V, IntTy);
+     assert(NewBeginOffset >= NewAllocaBeginOffset && "Out of bounds offset");
+     uint64_t Offset = NewBeginOffset - NewAllocaBeginOffset;
++    unsigned BitsPerByte = DL.getBitsPerByte();
+     if (Offset > 0 || NewEndOffset < NewAllocaEndOffset) {
+-      IntegerType *ExtractTy = Type::getIntNTy(LI.getContext(), SliceSize * 8);
++      IntegerType *ExtractTy = Type::getIntNTy(LI.getContext(), SliceSize * BitsPerByte);
+       V = extractInteger(DL, IRB, V, ExtractTy, Offset, "extract");
+     }
+     // It is possible that the extracted type is not the load type. This
+@@ -2358,9 +2364,9 @@ private:
+     // a consequence the slice is narrower but still a candidate for integer
+     // lowering. To handle this case, we just zero extend the extracted
+     // integer.
+-    assert(cast<IntegerType>(LI.getType())->getBitWidth() >= SliceSize * 8 &&
++    assert(cast<IntegerType>(LI.getType())->getBitWidth() >= SliceSize * BitsPerByte &&
+            "Can only handle an extract for an overly wide load");
+-    if (cast<IntegerType>(LI.getType())->getBitWidth() > SliceSize * 8)
++    if (cast<IntegerType>(LI.getType())->getBitWidth() > SliceSize * BitsPerByte)
+       V = IRB.CreateZExt(V, LI.getType());
+     return V;
+   }
+@@ -2370,7 +2376,9 @@ private:
+     Value *OldOp = LI.getOperand(0);
+     assert(OldOp == OldPtr);
+ 
+-    Type *TargetTy = IsSplit ? Type::getIntNTy(LI.getContext(), SliceSize * 8)
++    unsigned BitsPerByte = DL.getBitsPerByte();
++    Type *TargetTy = IsSplit ? Type::getIntNTy(LI.getContext(), SliceSize * BitsPerByte)
++
+                              : LI.getType();
+     const bool IsLoadPastEnd = DL.getTypeStoreSize(TargetTy) > SliceSize;
+     bool IsPtrAdjusted = false;
+@@ -2510,9 +2518,9 @@ private:
+       assert(V->getType()->getIntegerBitWidth() ==
+                  DL.getTypeStoreSizeInBits(V->getType()) &&
+              "Non-byte-multiple bit width");
+-      IntegerType *NarrowTy = Type::getIntNTy(SI.getContext(), SliceSize * 8);
+-      V = extractInteger(DL, IRB, V, NarrowTy, NewBeginOffset - BeginOffset,
+-                         "extract");
++      unsigned BitsPerByte = DL.getBitsPerByte();
++      IntegerType *NarrowTy = Type::getIntNTy(SI.getContext(), SliceSize * BitsPerByte);
++      V = extractInteger(DL, IRB, V, NarrowTy, NewBeginOffset - BeginOffset, "extract");
+     }
+ 
+     if (VecTy)
+@@ -2564,16 +2572,17 @@ private:
+   /// call this routine.
+   /// FIXME: Heed the advice above.
+   ///
+-  /// \param V The i8 value to splat.
++  /// \param V The byte value to splat.
+   /// \param Size The number of bytes in the output (assuming i8 is one byte)
+   Value *getIntegerSplat(Value *V, unsigned Size) {
+     assert(Size > 0 && "Expected a positive number of bytes.");
+     IntegerType *VTy = cast<IntegerType>(V->getType());
+-    assert(VTy->getBitWidth() == 8 && "Expected an i8 value for the byte");
++    unsigned BitsPerByte = DL.getBitsPerByte();
++    assert(VTy->getBitWidth() == BitsPerByte && "Expected a byte");
+     if (Size == 1)
+       return V;
+ 
+-    Type *SplatIntTy = Type::getIntNTy(VTy->getContext(), Size * 8);
++    Type *SplatIntTy = Type::getIntNTy(VTy->getContext(), Size * BitsPerByte);
+     V = IRB.CreateMul(
+         IRB.CreateZExt(V, SplatIntTy, "zext"),
+         ConstantExpr::getUDiv(
+@@ -2616,12 +2625,13 @@ private:
+ 
+     // If this doesn't map cleanly onto the alloca type, and that type isn't
+     // a single value type, just emit a memset.
++    unsigned BitsPerByte = DL.getBitsPerByte();
+     if (!VecTy && !IntTy &&
+         (BeginOffset > NewAllocaBeginOffset || EndOffset < NewAllocaEndOffset ||
+          SliceSize != DL.getTypeStoreSize(AllocaTy) ||
+          !AllocaTy->isSingleValueType() ||
+          !DL.isLegalInteger(DL.getTypeSizeInBits(ScalarTy)) ||
+-         DL.getTypeSizeInBits(ScalarTy) % 8 != 0)) {
++         DL.getTypeSizeInBits(ScalarTy) % BitsPerByte != 0)) {
+       Type *SizeTy = II.getLength()->getType();
+       Constant *Size = ConstantInt::get(SizeTy, NewEndOffset - NewBeginOffset);
+       CallInst *New = IRB.CreateMemSet(
+@@ -2650,7 +2660,7 @@ private:
+       assert(NumElements <= VecTy->getNumElements() && "Too many elements!");
+ 
+       Value *Splat =
+-          getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ElementTy) / 8);
++          getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ElementTy) / BitsPerByte);
+       Splat = convertValue(DL, IRB, Splat, ElementTy);
+       if (NumElements > 1)
+         Splat = getVectorSplat(Splat, NumElements);
+@@ -2683,7 +2693,7 @@ private:
+       assert(NewBeginOffset == NewAllocaBeginOffset);
+       assert(NewEndOffset == NewAllocaEndOffset);
+ 
+-      V = getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ScalarTy) / 8);
++      V = getIntegerSplat(II.getValue(), DL.getTypeSizeInBits(ScalarTy) / BitsPerByte);
+       if (VectorType *AllocaVecTy = dyn_cast<VectorType>(AllocaTy))
+         V = getVectorSplat(V, AllocaVecTy->getNumElements());
+ 
+@@ -2806,8 +2816,9 @@ private:
+     unsigned BeginIndex = VecTy ? getIndex(NewBeginOffset) : 0;
+     unsigned EndIndex = VecTy ? getIndex(NewEndOffset) : 0;
+     unsigned NumElements = EndIndex - BeginIndex;
+-    IntegerType *SubIntTy =
+-        IntTy ? Type::getIntNTy(IntTy->getContext(), Size * 8) : nullptr;
++    unsigned BitsPerByte = DL.getBitsPerByte();
++    IntegerType *SubIntTy
++      = IntTy ? Type::getIntNTy(IntTy->getContext(), Size * BitsPerByte) : nullptr;
+ 
+     // Reset the other pointer type to match the register type we're going to
+     // use, but using the address space of the original other pointer.
+@@ -3807,7 +3818,7 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
+                                    Partition &P) {
+   // Try to compute a friendly type for this partition of the alloca. This
+   // won't always succeed, in which case we fall back to a legal integer type
+-  // or an i8 array of an appropriate size.
++  // or a byte array of an appropriate size.
+   Type *SliceTy = nullptr;
+   const DataLayout &DL = AI.getModule()->getDataLayout();
+   if (Type *CommonUseTy = findCommonType(P.begin(), P.end(), P.endOffset()))
+@@ -3817,12 +3828,13 @@ AllocaInst *SROA::rewritePartition(AllocaInst &AI, AllocaSlices &AS,
+     if (Type *TypePartitionTy = getTypePartition(DL, AI.getAllocatedType(),
+                                                  P.beginOffset(), P.size()))
+       SliceTy = TypePartitionTy;
++  unsigned BitsPerByte = DL.getBitsPerByte();
+   if ((!SliceTy || (SliceTy->isArrayTy() &&
+                     SliceTy->getArrayElementType()->isIntegerTy())) &&
+-      DL.isLegalInteger(P.size() * 8))
+-    SliceTy = Type::getIntNTy(*C, P.size() * 8);
++      DL.isLegalInteger(P.size() * BitsPerByte))
++    SliceTy = Type::getIntNTy(*C, P.size() * BitsPerByte);
+   if (!SliceTy)
+-    SliceTy = ArrayType::get(Type::getInt8Ty(*C), P.size());
++    SliceTy = ArrayType::get(Type::getIntNTy(*C, BitsPerByte), P.size());
+   assert(DL.getTypeAllocSize(SliceTy) >= P.size());
+ 
+   bool IsIntegerPromotable = isIntegerWideningViable(P, SliceTy, DL);
+-- 
+2.9.3
+
