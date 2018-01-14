@@ -15,7 +15,7 @@
 #include "DCPU16.h"
 #include "DCPU16MachineFunctionInfo.h"
 #include "DCPU16TargetMachine.h"
-#include "llvm/Function.h"
+#include "llvm/IR/Function.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
@@ -39,10 +39,10 @@ void DCPU16InstrInfo::storeRegToStackSlot(MachineBasicBlock &MBB,
   DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
   MachineFunction &MF = *MBB.getParent();
-  MachineFrameInfo &MFI = *MF.getFrameInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
 
   MachineMemOperand *MMO =
-    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FrameIdx),
+    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(MF, FrameIdx),
                             MachineMemOperand::MOStore,
                             MFI.getObjectSize(FrameIdx),
                             MFI.getObjectAlignment(FrameIdx));
@@ -63,10 +63,10 @@ void DCPU16InstrInfo::loadRegFromStackSlot(MachineBasicBlock &MBB,
   DebugLoc DL;
   if (MI != MBB.end()) DL = MI->getDebugLoc();
   MachineFunction &MF = *MBB.getParent();
-  MachineFrameInfo &MFI = *MF.getFrameInfo();
+  MachineFrameInfo &MFI = MF.getFrameInfo();
 
   MachineMemOperand *MMO =
-    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(FrameIdx),
+    MF.getMachineMemOperand(MachinePointerInfo::getFixedStack(MF, FrameIdx),
                             MachineMemOperand::MOLoad,
                             MFI.getObjectSize(FrameIdx),
                             MFI.getObjectAlignment(FrameIdx));
@@ -201,13 +201,13 @@ ReverseBranchCondition(SmallVectorImpl<MachineOperand> &Cond) const {
   return false;
 }
 
-bool DCPU16InstrInfo::isUnpredicatedTerminator(const MachineInstr *MI) const {
-  if (!MI->isTerminator()) return false;
+bool DCPU16InstrInfo::isUnpredicatedTerminator(const MachineInstr &MI) const {
+  if (!MI.isTerminator()) return false;
 
   // Conditional branch is a special case.
-  if (MI->isBranch() && !MI->isBarrier())
+  if (MI.isBranch() && !MI.isBarrier())
     return true;
-  if (!MI->isPredicable())
+  if (!MI.isPredicable())
     return true;
   return !isPredicated(MI);
 }
@@ -257,7 +257,7 @@ bool DCPU16InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
 
     // Working from the bottom, when we see a non-terminator
     // instruction, we're done.
-    if (!isUnpredicatedTerminator(I))
+    if (!isUnpredicatedTerminator(*I))
       break;
 
     // A terminator that isn't a branch can't easily be handled
@@ -278,8 +278,8 @@ bool DCPU16InstrInfo::AnalyzeBranch(MachineBasicBlock &MBB,
       }
 
       // If the block has any instructions after a JMP, delete them.
-      while (llvm::next(I) != MBB.end())
-        llvm::next(I)->eraseFromParent();
+      while (std::next(I) != MBB.end())
+        std::next(I)->eraseFromParent();
       Cond.clear();
       FBB = 0;
 
@@ -423,7 +423,7 @@ unsigned DCPU16InstrInfo::GetInstSizeInBytes(const MachineInstr *MI) const {
   default:
     switch (Desc.getOpcode()) {
     default: llvm_unreachable("Unknown instruction size!");
-    case TargetOpcode::PROLOG_LABEL:
+    case TargetOpcode::CFI_INSTRUCTION: // Used to be PROLOG_LABEL
     case TargetOpcode::EH_LABEL:
     case TargetOpcode::IMPLICIT_DEF:
     case TargetOpcode::KILL:
@@ -431,7 +431,7 @@ unsigned DCPU16InstrInfo::GetInstSizeInBytes(const MachineInstr *MI) const {
       return 0;
     case TargetOpcode::INLINEASM: {
       const MachineFunction *MF = MI->getParent()->getParent();
-      const TargetInstrInfo &TII = *MF->getTarget().getInstrInfo();
+      const TargetInstrInfo &TII = *MF->getSubtarget().getInstrInfo();
       return TII.getInlineAsmLength(MI->getOperand(0).getSymbolName(),
                                     *MF->getTarget().getMCAsmInfo());
     }
