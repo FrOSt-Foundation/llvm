@@ -14,48 +14,48 @@
 #include "DCPU16FrameLowering.h"
 #include "DCPU16InstrInfo.h"
 #include "DCPU16MachineFunctionInfo.h"
-#include "llvm/Function.h"
+#include "llvm/IR/Function.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineModuleInfo.h"
 #include "llvm/CodeGen/MachineRegisterInfo.h"
-#include "llvm/DataLayout.h"
+#include "llvm/IR/DataLayout.h"
 #include "llvm/Target/TargetOptions.h"
 #include "llvm/Support/CommandLine.h"
 
 using namespace llvm;
 
 bool DCPU16FrameLowering::hasFP(const MachineFunction &MF) const {
-  const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const MachineFrameInfo &MFI = MF.getFrameInfo();
 
   return (MF.getTarget().Options.DisableFramePointerElim(MF) ||
-          MF.getFrameInfo()->hasVarSizedObjects() ||
-          MFI->isFrameAddressTaken());
+          MF.getFrameInfo().hasVarSizedObjects() ||
+          MFI.isFrameAddressTaken());
 }
 
 bool DCPU16FrameLowering::hasReservedCallFrame(const MachineFunction &MF) const {
-  return !MF.getFrameInfo()->hasVarSizedObjects();
+  return !MF.getFrameInfo().hasVarSizedObjects();
 }
 
 void DCPU16FrameLowering::emitPrologue(MachineFunction &MF, MachineBasicBlock &MBB) const {
-  MachineFrameInfo *MFI = MF.getFrameInfo();
+  MachineFrameInfo MFI = MF.getFrameInfo();
   DCPU16MachineFunctionInfo *DCPU16FI = MF.getInfo<DCPU16MachineFunctionInfo>();
   const DCPU16InstrInfo &TII =
-    *static_cast<const DCPU16InstrInfo*>(MF.getTarget().getInstrInfo());
+    *static_cast<const DCPU16InstrInfo*>(MF.getSubtarget().getInstrInfo());
 
   MachineBasicBlock::iterator MBBI = MBB.begin();
   DebugLoc DL = MBBI != MBB.end() ? MBBI->getDebugLoc() : DebugLoc();
 
   // Get the number of bytes to allocate from the FrameInfo.
-  uint64_t StackSize = MFI->getStackSize();
+  uint64_t StackSize = MFI.getStackSize();
 
   uint64_t NumBytes = StackSize - DCPU16FI->getCalleeSavedFrameSize();
   if (hasFP(MF)) {
     // Get the offset of the stack slot for the EBP register... which is
     // guaranteed to be the last slot by processFunctionBeforeFrameFinalized.
     // Update the frame offset adjustment.
-    MFI->setOffsetAdjustment(-NumBytes);
+    MFI.setOffsetAdjustment(-NumBytes);
 
     // Save J into the appropriate stack slot...
     BuildMI(MBB, MBBI, DL, TII.get(DCPU16::PUSH16r))
@@ -66,7 +66,7 @@ void DCPU16FrameLowering::emitPrologue(MachineFunction &MF, MachineBasicBlock &M
       .addReg(DCPU16::SP);
 
     // Mark the FramePtr as live-in in every block except the entry.
-    for (MachineFunction::iterator I = llvm::next(MF.begin()), E = MF.end();
+    for (MachineFunction::iterator I = std::next(MF.begin()), E = MF.end();
          I != E; ++I)
       I->addLiveIn(DCPU16::J);
   }
@@ -98,10 +98,10 @@ void DCPU16FrameLowering::emitPrologue(MachineFunction &MF, MachineBasicBlock &M
 
 void DCPU16FrameLowering::emitEpilogue(MachineFunction &MF,
                                        MachineBasicBlock &MBB) const {
-  const MachineFrameInfo *MFI = MF.getFrameInfo();
+  const MachineFrameInfo MFI = MF.getFrameInfo();
   DCPU16MachineFunctionInfo *DCPU16FI = MF.getInfo<DCPU16MachineFunctionInfo>();
   const DCPU16InstrInfo &TII =
-    *static_cast<const DCPU16InstrInfo*>(MF.getTarget().getInstrInfo());
+    *static_cast<const DCPU16InstrInfo*>(MF.getSubtarget().getInstrInfo());
 
   MachineBasicBlock::iterator MBBI = MBB.getLastNonDebugInstr();
   unsigned RetOpcode = MBBI->getOpcode();
@@ -115,7 +115,7 @@ void DCPU16FrameLowering::emitEpilogue(MachineFunction &MF,
   }
 
   // Get the number of bytes to allocate from the FrameInfo.
-  uint64_t StackSize = MFI->getStackSize();
+  uint64_t StackSize = MFI.getStackSize();
   unsigned CSSize = DCPU16FI->getCalleeSavedFrameSize();
   uint64_t NumBytes = StackSize - CSSize;
 
@@ -126,7 +126,7 @@ void DCPU16FrameLowering::emitEpilogue(MachineFunction &MF,
 
   // Skip the callee-saved pop instructions.
   while (MBBI != MBB.begin()) {
-    MachineBasicBlock::iterator PI = prior(MBBI);
+    MachineBasicBlock::iterator PI = std::prev(MBBI);
     unsigned Opc = PI->getOpcode();
     if (Opc != DCPU16::POP16r && !PI->isTerminator())
       break;
@@ -140,7 +140,7 @@ void DCPU16FrameLowering::emitEpilogue(MachineFunction &MF,
   //if (NumBytes || MFI->hasVarSizedObjects())
   //  mergeSPUpdatesUp(MBB, MBBI, StackPtr, &NumBytes);
 
-  if (MFI->hasVarSizedObjects()) {
+  if (MFI.hasVarSizedObjects()) {
     BuildMI(MBB, MBBI, DL,
             TII.get(DCPU16::MOV16rr), DCPU16::SP).addReg(DCPU16::J);
     if (CSSize) {
@@ -176,7 +176,7 @@ DCPU16FrameLowering::spillCalleeSavedRegisters(MachineBasicBlock &MBB,
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   MachineFunction &MF = *MBB.getParent();
-  const TargetInstrInfo &TII = *MF.getTarget().getInstrInfo();
+  const TargetInstrInfo &TII = *MF.getSubtarget().getInstrInfo();
   DCPU16MachineFunctionInfo *MFI = MF.getInfo<DCPU16MachineFunctionInfo>();
   MFI->setCalleeSavedFrameSize(CSI.size());
 
@@ -202,10 +202,10 @@ DCPU16FrameLowering::restoreCalleeSavedRegisters(MachineBasicBlock &MBB,
   if (MI != MBB.end()) DL = MI->getDebugLoc();
 
   MachineFunction &MF = *MBB.getParent();
-  const TargetInstrInfo &TII = *MF.getTarget().getInstrInfo();
+  const TargetInstrInfo *TII = MF.getSubtarget().getInstrInfo();
 
   for (unsigned i = 0, e = CSI.size(); i != e; ++i)
-    BuildMI(MBB, MI, DL, TII.get(DCPU16::POP16r), CSI[i].getReg());
+    BuildMI(MBB, MI, DL, TII->get(DCPU16::POP16r), CSI[i].getReg());
 
   return true;
 }
@@ -215,9 +215,9 @@ DCPU16FrameLowering::processFunctionBeforeFrameFinalized(MachineFunction &MF)
                                                                          const {
   // Create a frame entry for the J register that must be saved.
   if (hasFP(MF)) {
-    int FrameIdx = MF.getFrameInfo()->CreateFixedObject(1, -1, true);
+    int FrameIdx = MF.getFrameInfo().CreateFixedObject(1, -1, true);
     (void)FrameIdx;
-    assert(FrameIdx == MF.getFrameInfo()->getObjectIndexBegin() &&
+    assert(FrameIdx == MF.getFrameInfo().getObjectIndexBegin() &&
            "Slot for J register must be last in order to be found!");
   }
 }
